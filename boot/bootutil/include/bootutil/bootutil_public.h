@@ -55,31 +55,28 @@ extern "C" {
 #define ALIGN_DOWN(num, align)  ((num) & ~((align) - 1))
 #endif
 
-/** Attempt to boot the contents of the primary slot. */
-#define BOOT_SWAP_TYPE_NONE     1
+typedef enum {
+    /** Attempt to boot the contents of the primary slot. */
+    BOOT_SWAP_TYPE_NONE             = 0x01U,
+    /**
+     * Swap to the secondary slot.
+     * Absent a confirm command, revert back on next boot.
+     */
+    BOOT_SWAP_TYPE_TEST             = 0x02U,
+    /**
+     * Swap to the secondary slot,
+     * and permanently switch to booting its contents.
+     */
+    BOOT_SWAP_TYPE_PERM             = 0x03U,
+    /** Swap back to alternate slot.  A confirm changes this state to NONE. */
+    BOOT_SWAP_TYPE_REVERT           = 0x04U,
+    /** Swap failed because image to be run is not valid */
+    BOOT_SWAP_TYPE_FAIL             = 0x05U,
+    /** Swapping encountered an unrecoverable error */
+    BOOT_SWAP_TYPE_PANIC            = 0xFFU
+} boot_swap_type_t;
 
-/**
- * Swap to the secondary slot.
- * Absent a confirm command, revert back on next boot.
- */
-#define BOOT_SWAP_TYPE_TEST     2
-
-/**
- * Swap to the secondary slot,
- * and permanently switch to booting its contents.
- */
-#define BOOT_SWAP_TYPE_PERM     3
-
-/** Swap back to alternate slot.  A confirm changes this state to NONE. */
-#define BOOT_SWAP_TYPE_REVERT   4
-
-/** Swap failed because image to be run is not valid */
-#define BOOT_SWAP_TYPE_FAIL     5
-
-/** Swapping encountered an unrecoverable error */
-#define BOOT_SWAP_TYPE_PANIC    0xff
-
-#define BOOT_MAGIC_SZ           16
+#define BOOT_MAGIC_SZ           16U
 
 #ifdef MCUBOOT_BOOT_MAX_ALIGN
 
@@ -93,29 +90,41 @@ _Static_assert(MCUBOOT_BOOT_MAX_ALIGN >= 8 && MCUBOOT_BOOT_MAX_ALIGN <= 32,
 #define BOOT_MAGIC_ALIGN_SIZE   BOOT_MAGIC_SZ
 #endif
 
-#define BOOT_MAGIC_GOOD     1
-#define BOOT_MAGIC_BAD      2
-#define BOOT_MAGIC_UNSET    3
-#define BOOT_MAGIC_ANY      4  /* NOTE: control only, not dependent on sector */
-#define BOOT_MAGIC_NOTGOOD  5  /* NOTE: control only, not dependent on sector */
+typedef enum {
+    BOOT_MAGIC_GOOD    = 0x01U,
+    BOOT_MAGIC_BAD     = 0x02U,
+    BOOT_MAGIC_UNSET   = 0x03U,
+    BOOT_MAGIC_ANY     = 0x04U, /* NOTE: control only, not dependent on sector */
+    BOOT_MAGIC_NOTGOOD = 0x05U  /* NOTE: control only, not dependent on sector */
+} boot_magic_t;
 
 /*
  * NOTE: leave BOOT_FLAG_SET equal to one, this is written to flash!
  */
-#define BOOT_FLAG_SET       1
-#define BOOT_FLAG_BAD       2
-#define BOOT_FLAG_UNSET     3
-#define BOOT_FLAG_ANY       4  /* NOTE: control only, not dependent on sector */
+typedef enum {
+    BOOT_FLAG_SET   = 0x01U,
+    BOOT_FLAG_BAD   = 0x02U,
+    BOOT_FLAG_UNSET = 0x03U,
+    BOOT_FLAG_ANY   = 0x04U /* NOTE: control only, not dependent on sector */
+} boot_flag_t;
 
-#define BOOT_EFLASH      1
-#define BOOT_EFILE       2
-#define BOOT_EBADIMAGE   3
-#define BOOT_EBADVECT    4
-#define BOOT_EBADSTATUS  5
-#define BOOT_ENOMEM      6
-#define BOOT_EBADARGS    7
-#define BOOT_EBADVERSION 8
-#define BOOT_EFLASH_SEC  9
+typedef enum {
+    BOOT_SUCCESS     = 0x00U,
+    BOOT_EFLASH      = 0x01U,
+    BOOT_EFILE       = 0x02U,
+    BOOT_EBADIMAGE   = 0x03U,
+    BOOT_EBADVECT    = 0x04U,
+    BOOT_EBADSTATUS  = 0x05U,
+    BOOT_ENOMEM      = 0x06U,
+    BOOT_EBADARGS    = 0x07U,
+    BOOT_EBADVERSION = 0x08U,
+    BOOT_EFLASH_SEC  = 0x09U,
+    BOOT_ERROR       = 0xFFU,
+} boot_status_t;
+
+#define IF_SUCCESS(status) if ((status) == BOOT_SUCCESS)
+#define IF_ERROR(status) if ((status) != BOOT_SUCCESS)
+#define RETURN_IF_ERROR(status, code) IF_ERROR((status)) return (code)
 
 #define BOOT_HOOK_REGULAR 1
 /*
@@ -142,10 +151,10 @@ _Static_assert(MCUBOOT_BOOT_MAX_ALIGN >= 8 && MCUBOOT_BOOT_MAX_ALIGN <= 32,
 #endif
 
 struct boot_swap_state {
-    uint8_t magic;      /* One of the BOOT_MAGIC_[...] values. */
-    uint8_t swap_type;  /* One of the BOOT_SWAP_TYPE_[...] values. */
-    uint8_t copy_done;  /* One of the BOOT_FLAG_[...] values. */
-    uint8_t image_ok;   /* One of the BOOT_FLAG_[...] values. */
+    boot_magic_t magic;      /* One of the BOOT_MAGIC_[...] values. */
+    boot_swap_type_t swap_type;  /* One of the BOOT_SWAP_TYPE_[...] values. */
+    boot_flag_t copy_done;  /* One of the BOOT_FLAG_[...] values. */
+    boot_flag_t image_ok;   /* One of the BOOT_FLAG_[...] values. */
     uint8_t image_num;  /* Boot status belongs to this image */
 };
 

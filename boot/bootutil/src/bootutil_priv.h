@@ -163,9 +163,9 @@ extern const union boot_img_magic_t boot_img_magic;
 _Static_assert(sizeof(boot_img_magic) == BOOT_MAGIC_SZ, "Invalid size for image magic");
 
 #if !defined(MCUBOOT_DIRECT_XIP) && !defined(MCUBOOT_RAM_LOAD)
-#define ARE_SLOTS_EQUIVALENT()    0
+#define ARE_SLOTS_EQUIVALENT()    (false)
 #else
-#define ARE_SLOTS_EQUIVALENT()    1
+#define ARE_SLOTS_EQUIVALENT()    (true)
 
 #if defined(MCUBOOT_DIRECT_XIP) && defined(MCUBOOT_ENC_IMAGES)
 #error "Image encryption (MCUBOOT_ENC_IMAGES) is not supported when MCUBOOT_DIRECT_XIP is selected."
@@ -211,25 +211,28 @@ typedef struct flash_sector boot_sector_t;
 typedef struct flash_area boot_sector_t;
 #endif
 
+typedef uint32_t boot_size_t;
+typedef uint32_t boot_address_t;
+
 /** Private state maintained during boot. */
 struct boot_loader_state {
     struct {
         struct image_header hdr;
         const struct flash_area *area;
         boot_sector_t *sectors;
-        uint32_t num_sectors;
+        boot_size_t num_sectors;
     } imgs[BOOT_IMAGE_NUMBER][BOOT_NUM_SLOTS];
 
 #if MCUBOOT_SWAP_USING_SCRATCH
     struct {
         const struct flash_area *area;
         boot_sector_t *sectors;
-        uint32_t num_sectors;
+        boot_address_t num_sectors;
     } scratch;
 #endif
 
-    uint8_t swap_type[BOOT_IMAGE_NUMBER];
-    uint32_t write_sz;
+    boot_swap_type_t swap_type[BOOT_IMAGE_NUMBER];
+    boot_size_t write_sz;
 
 #if defined(MCUBOOT_ENC_IMAGES)
     struct enc_key_data enc[BOOT_IMAGE_NUMBER][BOOT_NUM_SLOTS];
@@ -247,8 +250,8 @@ struct boot_loader_state {
         bool slot_available[BOOT_NUM_SLOTS];
 #if defined(MCUBOOT_RAM_LOAD)
         /* Image destination and size for the active slot */
-        uint32_t img_dst;
-        uint32_t img_sz;
+        boot_address_t img_dst;
+        boot_size_t img_sz;
 #elif defined(MCUBOOT_DIRECT_XIP_REVERT)
         /* Swap status for the active slot */
         struct boot_swap_state swap_state;
