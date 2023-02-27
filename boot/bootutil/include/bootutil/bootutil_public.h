@@ -40,6 +40,7 @@
 
 #include <inttypes.h>
 #include <string.h>
+#include <stdbool.h>
 #include <flash_map_backend/flash_map_backend.h>
 #include <mcuboot_config/mcuboot_config.h>
 
@@ -131,7 +132,7 @@ typedef enum {
  * Extract the swap type and image number from image trailers's swap_info
  * filed.
  */
-#define BOOT_GET_SWAP_TYPE(swap_info)    ((swap_info) & 0x0F)
+#define BOOT_GET_SWAP_TYPE(swap_info)    ((boot_swap_type_t)((swap_info) & 0x0F))
 #define BOOT_GET_IMAGE_NUM(swap_info)    ((swap_info) >> 4)
 
 /* Construct the swap_info field from swap type and image number */
@@ -166,7 +167,7 @@ struct boot_swap_state {
  * @return a BOOT_SWAP_TYPE_[...] constant on success, negative errno code on
  * fail.
  */
-int boot_swap_type_multi(int image_index);
+boot_swap_type_t boot_swap_type_multi(int image_index);
 
 /**
  * @brief Determines the action, if any, that mcuboot will take.
@@ -176,7 +177,7 @@ int boot_swap_type_multi(int image_index);
  * @return a BOOT_SWAP_TYPE_[...] constant on success, negative errno code on
  * fail.
  */
-int boot_swap_type(void);
+boot_swap_type_t boot_swap_type(void);
 
 /**
  * Marks the image with the given index in the secondary slot as pending. On the
@@ -192,7 +193,7 @@ int boot_swap_type(void);
  *
  * @return                  0 on success; nonzero on failure.
  */
-int boot_set_pending_multi(int image_index, int permanent);
+boot_status_t boot_set_pending_multi(int image_index, bool permanent);
 
 /**
  * Marks the image with index 0 in the secondary slot as pending. On the next
@@ -207,7 +208,7 @@ int boot_set_pending_multi(int image_index, int permanent);
  *
  * @return                  0 on success; nonzero on failure.
  */
-int boot_set_pending(int permanent);
+boot_status_t boot_set_pending(bool permanent);
 
 /**
  * Marks the image with the given index in the primary slot as confirmed.  The
@@ -218,7 +219,7 @@ int boot_set_pending(int permanent);
  *
  * @return                  0 on success; nonzero on failure.
  */
-int boot_set_confirmed_multi(int image_index);
+boot_status_t boot_set_confirmed_multi(int image_index);
 
 /**
  * Marks the image with index 0 in the primary slot as confirmed.  The system
@@ -228,7 +229,7 @@ int boot_set_confirmed_multi(int image_index);
  *
  * @return                  0 on success; nonzero on failure.
  */
-int boot_set_confirmed(void);
+boot_status_t boot_set_confirmed(void);
 
 /**
  * @brief Get offset of the swap info field in the image trailer.
@@ -237,7 +238,8 @@ int boot_set_confirmed(void);
  *
  * @retval offset of the swap info field.
  */
-uint32_t boot_swap_info_off(const struct flash_area *fap);
+uint32_t
+boot_swap_info_off(const struct flash_area *fap);
 
 /**
  * @brief Get value of image-ok flag of the image.
@@ -250,7 +252,8 @@ uint32_t boot_swap_info_off(const struct flash_area *fap);
  *
  * @return 0 on success; nonzero on failure.
  */
-int boot_read_image_ok(const struct flash_area *fap, uint8_t *image_ok);
+boot_status_t
+boot_read_image_ok(const struct flash_area *fap, boot_flag_t *image_ok);
 
 /**
  * @brief Read the image swap state
@@ -260,7 +263,7 @@ int boot_read_image_ok(const struct flash_area *fap, uint8_t *image_ok);
  *
  * @return 0 on success; non-zero error code on failure;
  */
-int
+boot_status_t
 boot_read_swap_state_by_id(int flash_area_id, struct boot_swap_state *state);
 
 /**
@@ -271,7 +274,7 @@ boot_read_swap_state_by_id(int flash_area_id, struct boot_swap_state *state);
  *
  * @return 0 on success; non-zero error code on failure.
  */
-int
+boot_status_t
 boot_read_swap_state(const struct flash_area *fa,
                      struct boot_swap_state *state);
 

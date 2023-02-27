@@ -79,13 +79,13 @@ const union boot_img_magic_t boot_img_magic = {
 #endif
 
 struct boot_swap_table {
-    uint8_t magic_primary_slot;
-    uint8_t magic_secondary_slot;
-    uint8_t image_ok_primary_slot;
-    uint8_t image_ok_secondary_slot;
-    uint8_t copy_done_primary_slot;
+    boot_magic_t magic_primary_slot;
+    boot_magic_t magic_secondary_slot;
+    boot_flag_t image_ok_primary_slot;
+    boot_flag_t image_ok_secondary_slot;
+    boot_flag_t copy_done_primary_slot;
 
-    uint8_t swap_type;
+    boot_swap_type_t swap_type;
 };
 
 /**
@@ -129,8 +129,8 @@ static const struct boot_swap_table boot_swap_tables[] = {
 #define BOOT_SWAP_TABLES_COUNT \
     (sizeof boot_swap_tables / sizeof boot_swap_tables[0])
 
-static int
-boot_flag_decode(uint8_t flag)
+static boot_flag_t
+boot_flag_decode(boot_flag_t flag)
 {
     if (flag != BOOT_FLAG_SET) {
         return BOOT_FLAG_BAD;
@@ -192,7 +192,7 @@ bool bootutil_buffer_is_erased(const struct flash_area *area,
 }
 
 static boot_status_t
-boot_read_flag(const struct flash_area *fap, uint8_t *flag, uint32_t off)
+boot_read_flag(const struct flash_area *fap, boot_flag_t *flag, uint32_t off)
 {
     boot_status_t rc;
 
@@ -209,7 +209,7 @@ boot_read_flag(const struct flash_area *fap, uint8_t *flag, uint32_t off)
 }
 
 static inline boot_status_t
-boot_read_copy_done(const struct flash_area *fap, uint8_t *copy_done)
+boot_read_copy_done(const struct flash_area *fap, boot_flag_t *copy_done)
 {
     return boot_read_flag(fap, copy_done, boot_copy_done_off(fap));
 }
@@ -355,7 +355,7 @@ boot_write_image_ok(const struct flash_area *fap)
 }
 
 boot_status_t
-boot_read_image_ok(const struct flash_area *fap, uint8_t *image_ok)
+boot_read_image_ok(const struct flash_area *fap, boot_flag_t *image_ok)
 {
     return boot_read_flag(fap, image_ok, boot_image_ok_off(fap));
 }
@@ -472,7 +472,7 @@ boot_set_pending_multi(int image_index, bool permanent)
     const struct flash_area *fap;
     struct boot_swap_state state_secondary_slot;
     uint8_t swap_type;
-    int rc;
+    boot_status_t rc;
 
     rc = flash_area_open(FLASH_AREA_IMAGE_SECONDARY(image_index), &fap);
     RETURN_IF_ERROR(rc, BOOT_EFLASH);

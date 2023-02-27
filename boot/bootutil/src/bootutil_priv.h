@@ -80,7 +80,7 @@ struct boot_status {
     uint8_t state;        /* Which part of the swapping process are we at */
     uint8_t op;           /* What operation are we performing? */
     uint8_t use_scratch;  /* Are status bytes ever written to scratch? */
-    uint8_t swap_type;    /* The type of swap in effect */
+    boot_swap_type_t swap_type;    /* The type of swap in effect */
     uint32_t swap_size;   /* Total size of swapped image */
 #ifdef MCUBOOT_ENC_IMAGES
     uint8_t enckey[BOOT_NUM_SLOTS][BOOT_ENC_KEY_ALIGN_SIZE];
@@ -265,25 +265,25 @@ fih_ret bootutil_verify_sig(uint8_t *hash, uint32_t hlen, uint8_t *sig,
 
 fih_ret boot_fih_memequal(const void *s1, const void *s2, size_t n);
 
-int boot_magic_compatible_check(uint8_t tbl_val, uint8_t val);
+bool boot_magic_compatible_check(uint8_t tbl_val, uint8_t val);
 uint32_t boot_status_sz(uint32_t min_write_sz);
 uint32_t boot_trailer_sz(uint32_t min_write_sz);
 int boot_status_entries(int image_index, const struct flash_area *fap);
 uint32_t boot_status_off(const struct flash_area *fap);
-int boot_read_swap_state(const struct flash_area *fap,
+boot_status_t boot_read_swap_state(const struct flash_area *fap,
                          struct boot_swap_state *state);
-int boot_read_swap_state_by_id(int flash_area_id,
+boot_status_t boot_read_swap_state_by_id(int flash_area_id,
                                struct boot_swap_state *state);
-int boot_write_magic(const struct flash_area *fap);
+boot_status_t boot_write_magic(const struct flash_area *fap);
 int boot_write_status(const struct boot_loader_state *state, struct boot_status *bs);
 int boot_write_copy_done(const struct flash_area *fap);
-int boot_write_image_ok(const struct flash_area *fap);
-int boot_write_swap_info(const struct flash_area *fap, uint8_t swap_type,
+boot_status_t boot_write_image_ok(const struct flash_area *fap);
+boot_status_t boot_write_swap_info(const struct flash_area *fap, uint8_t swap_type,
                          uint8_t image_num);
 int boot_write_swap_size(const struct flash_area *fap, uint32_t swap_size);
-int boot_write_trailer(const struct flash_area *fap, uint32_t off,
+boot_status_t boot_write_trailer(const struct flash_area *fap, uint32_t off,
                        const uint8_t *inbuf, uint8_t inlen);
-int boot_write_trailer_flag(const struct flash_area *fap, uint32_t off,
+boot_status_t boot_write_trailer_flag(const struct flash_area *fap, uint32_t off,
                             uint8_t flag_val);
 int boot_read_swap_size(int image_index, uint32_t *swap_size);
 int boot_slots_compatible(struct boot_loader_state *state);
