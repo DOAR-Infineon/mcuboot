@@ -1970,6 +1970,10 @@ context_boot_go(struct boot_loader_state *state, struct boot_rsp *rsp)
 
     fill_rsp(state, rsp);
 
+#if defined(MCUBOOT_ENC_IMAGES_XIP)
+    boot_xip_populate_rsp(BOOT_CURR_IMG(state), rsp);
+#endif
+
     fih_rc = FIH_SUCCESS;
 out:
     /*
@@ -2453,6 +2457,10 @@ context_boot_go(struct boot_loader_state *state, struct boot_rsp *rsp)
 #endif
 
     fill_rsp(state, rsp);
+
+#if defined(MCUBOOT_ENC_IMAGES_XIP)
+    boot_xip_populate_rsp(BOOT_CURR_IMG(state), rsp);
+#endif
 
 close:
     boot_close_all_flash_areas(state);

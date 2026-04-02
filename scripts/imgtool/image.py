@@ -512,12 +512,65 @@ class Image:
                 format=PublicFormat.Raw)
         return cipherkey, ciphermac, pubk
 
+    def ecies_hkdf_xip(self, enckey, plainkey):
+        """ECIES-P256 with extended TLV for XIP encryption.
+
+        Derives 80 bytes via HKDF with random salt:
+          [0..15]  = AES key (wrapping key for plainkey)
+          [16..47] = HMAC-SHA256 key
+          [48..63] = key_iv (AES-CTR IV for key wrapping)
+          [64..79] = xip_iv (IV for XIP payload encryption)
+
+        Returns: (cipherkey, mac, pubk, salt, xip_iv)
+        """
+        # Step 1: ECDH key agreement
+        newpk = ec.generate_private_key(ec.SECP256R1(), default_backend())
+        shared = newpk.exchange(ec.ECDH(), enckey._get_public())
+
+        # Step 2: Generate random 32-byte salt
+        salt = os.urandom(32)
+
+        # Step 3: HKDF with salt -> 80 bytes
+        derived_key = HKDF(
+            algorithm=hashes.SHA256(),
+            length=80,
+            salt=salt,
+            info=b'MCUBoot_ECIES_v1',
+            backend=default_backend()
+        ).derive(shared)
+
+        aes_key = derived_key[0:16]
+        hmac_key = derived_key[16:48]
+        key_iv = derived_key[48:64]
+        xip_iv = derived_key[64:80]
+
+        # Step 4: AES-CTR wrap plainkey using key_iv (not zero nonce)
+        encryptor = Cipher(
+            algorithms.AES(aes_key),
+            modes.CTR(key_iv),
+            backend=default_backend()
+        ).encryptor()
+        cipherkey = encryptor.update(plainkey) + encryptor.finalize()
+
+        # Step 5: HMAC-SHA256 over encrypted key
+        mac_ctx = hmac.HMAC(hmac_key, hashes.SHA256(),
+                            backend=default_backend())
+        mac_ctx.update(cipherkey)
+        ciphermac = mac_ctx.finalize()
+
+        # Step 6: Ephemeral public key
+        pubk = newpk.public_key().public_bytes(
+            encoding=Encoding.X962,
+            format=PublicFormat.UncompressedPoint)
+
+        return cipherkey, ciphermac, pubk, salt, xip_iv
+
     def create(self, key, public_key_format, enckey, dependencies=None,
                sw_type=None, custom_tlvs=None, compression_tlvs=None,
                compression_type=None, encrypt_keylen=128, clear=False,
                fixed_sig=None, pub_key=None, vector_to_sign=None,
                user_sha='auto', hmac_sha='auto', is_pure=False, keep_comp_size=False,
-               dont_encrypt=False):
+               dont_encrypt=False, xip_mode=False):
         self.enckey = enckey
 
         # key decides on sha, then pub_key; of both are none default is used
@@ -761,6 +814,7 @@ class Image:
                 else:
                     raise click.UsageError("Unsupported HMAC-SHA")
 
+            xip_iv = None
             if isinstance(enckey, rsa.RSAPublic):
                 cipherkey = enckey._get_public().encrypt(
                     plainkey, padding.OAEP(
@@ -769,7 +823,17 @@ class Image:
                         label=None))
                 self.enctlv_len = len(cipherkey)
                 tlv.add('ENCRSA2048', cipherkey)
+            elif isinstance(enckey, ecdsa.ECDSA256P1Public) and xip_mode:
+                # XIP: extended ECIES TLV (177 bytes)
+                cipherkey, mac, pubk, salt, xip_iv = \
+                    self.ecies_hkdf_xip(enckey, plainkey)
+                # 177 bytes: pubk(65) + mac(32) + cipherkey(16) + salt(32) + padding(32)
+                enctlv = pubk + mac + cipherkey + salt + bytes(32)
+                self.enctlv_len = len(enctlv)
+                assert len(enctlv) == 177
+                tlv.add('ENCEC256', enctlv)
             elif isinstance(enckey, ecdsa.ECDSA256P1Public):
+                # Standard: ECIES TLV (113 bytes)
                 cipherkey, mac, pubk = self.ecies_hkdf(enckey, plainkey, hmac_sha_alg)
                 enctlv = pubk + mac + cipherkey
                 self.enctlv_len = len(enctlv)
@@ -784,7 +848,16 @@ class Image:
                     tlv.add('ENCX25519_SHA512', enctlv)
 
             if not clear:
-                nonce = bytes([0] * 16)
+                if xip_mode and xip_iv is not None:
+                    # XIP: offset-based AES-CTR
+                    # Counter starts at (header_size >> 4) and increments per block.
+                    # This matches boot_decrypt_xip() nonce construction:
+                    #   nonce = xip_iv[0:12] || (off >> 4) as BE32
+                    initial_ctr = self.header_size >> 4
+                    nonce = xip_iv[0:12] + initial_ctr.to_bytes(4, 'big')
+                else:
+                    # Standard: flat zero nonce
+                    nonce = bytes([0] * 16)
                 cipher = Cipher(algorithms.AES(plainkey), modes.CTR(nonce),
                                 backend=default_backend())
                 encryptor = cipher.encryptor()

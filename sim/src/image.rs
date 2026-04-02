@@ -913,6 +913,125 @@ impl Images {
         fails > 0
     }
 
+    /// XIP swap validation: verify images remain encrypted after swap and
+    /// the bootloader can still boot them.
+    ///
+    /// Checks:
+    /// 1. After swap, primary slot contains the upgrade's CIPHERTEXT (not plaintext)
+    /// 2. After swap, primary payload differs from plaintext (proving no decryption)
+    /// 3. After swap, secondary slot contains the original primary's CIPHERTEXT
+    /// 4. A second boot succeeds (proving the swapped image is valid)
+    #[cfg(feature = "enc-xip-ec256")]
+    pub fn run_xip_swap_not_decrypted(&self) -> bool {
+        if !Caps::EncXipEc256.present() || !Caps::modifies_flash() {
+            return false;
+        }
+
+        let mut flash = self.flash.clone();
+        let mut fails = 0;
+
+        info!("XIP swap validation: checking images stay encrypted after swap");
+
+        // First boot: triggers swap (upgrade from secondary to primary)
+        if !c::boot_go(&mut flash, &self.areadesc, None, None, false).success() {
+            warn!("Failed first boot (swap)");
+            fails += 1;
+        }
+
+        for image in &self.images {
+            let primary = &image.slots[0];
+            let secondary = &image.slots[1];
+
+            // Read what's now in the primary slot after swap
+            let primary_size = image.upgrades.plain.len();
+            let mut primary_contents = vec![0u8; primary_size];
+            let dev = flash.get(&primary.dev_id).unwrap();
+            dev.read(primary.base_off, &mut primary_contents).unwrap();
+
+            // The upgrade's ciphertext (what should be in primary after swap)
+            let expected_cipher = image.upgrades.cipher.as_ref()
+                .expect("XIP test requires encrypted images");
+
+            // The upgrade's plaintext (what must NOT be in primary)
+            let upgrade_plain = &image.upgrades.plain;
+
+            // CHECK 1: Primary slot matches the upgrade's ciphertext
+            if &primary_contents[..] != &expected_cipher[..] {
+                warn!("FAIL: Primary slot after swap does not match upgrade ciphertext");
+                fails += 1;
+            } else {
+                info!("OK: Primary slot contains upgrade ciphertext after swap");
+            }
+
+            // CHECK 2: Primary payload differs from plaintext
+            // (Compare payload portion only — header is the same in both)
+            let hdr_size = 32usize; // HDR_SIZE
+            if primary_size > hdr_size {
+                let payload_cipher = &primary_contents[hdr_size..];
+                let payload_plain = &upgrade_plain[hdr_size..];
+                if payload_cipher == payload_plain {
+                    warn!("FAIL: Primary payload matches plaintext — image was decrypted during swap!");
+                    fails += 1;
+                } else {
+                    info!("OK: Primary payload differs from plaintext (still encrypted)");
+                }
+            }
+
+            // CHECK 3: Secondary slot contains the original primary's ciphertext
+            if self.is_swap_upgrade() {
+                let sec_size = image.primaries.plain.len();
+                let mut secondary_contents = vec![0u8; sec_size];
+                let sec_dev = flash.get(&secondary.dev_id).unwrap();
+                sec_dev.read(secondary.base_off, &mut secondary_contents).unwrap();
+
+                let original_primary_cipher = image.primaries.cipher.as_ref()
+                    .expect("XIP test requires encrypted primary images");
+
+                if &secondary_contents[..] != &original_primary_cipher[..] {
+                    warn!("FAIL: Secondary slot after swap does not match original primary ciphertext");
+                    fails += 1;
+                } else {
+                    info!("OK: Secondary slot contains original primary ciphertext after swap");
+                }
+            }
+        }
+
+        // CHECK 4: Mark permanent and do a second boot — must succeed
+        self.mark_permanent_upgrades(&mut flash, 0);
+
+        if !c::boot_go(&mut flash, &self.areadesc, None, None, false).success() {
+            warn!("FAIL: Second boot failed — swapped encrypted image is not valid");
+            fails += 1;
+        } else {
+            info!("OK: Second boot succeeds with swapped encrypted image");
+        }
+
+        // CHECK 5: After second boot, primary still has ciphertext
+        for image in &self.images {
+            let primary = &image.slots[0];
+            let primary_size = image.upgrades.plain.len();
+            let mut primary_contents = vec![0u8; primary_size];
+            let dev = flash.get(&primary.dev_id).unwrap();
+            dev.read(primary.base_off, &mut primary_contents).unwrap();
+
+            let expected_cipher = image.upgrades.cipher.as_ref().unwrap();
+            if &primary_contents[..] != &expected_cipher[..] {
+                warn!("FAIL: Primary slot changed after second boot (should remain encrypted)");
+                fails += 1;
+            } else {
+                info!("OK: Primary slot still encrypted after second boot");
+            }
+        }
+
+        if fails > 0 {
+            error!("XIP swap validation: {} checks failed", fails);
+        } else {
+            info!("XIP swap validation: all checks passed");
+        }
+
+        fails > 0
+    }
+
     // Test expecting failed upgrade and primary slot left untouched
     pub fn run_fail_upgrade_primary_intact(&self) -> bool {
         let mut flash = self.flash.clone();
@@ -1038,6 +1157,122 @@ impl Images {
 
         if fails > 0 {
             error!("Expected a non revert with new image");
+        }
+
+        fails > 0
+    }
+
+    /// Validate an imgtool-generated XIP-encrypted image against the C code.
+    pub fn run_imgtool_xip_validation(&self) -> bool {
+        use std::process::Command;
+
+        if !Caps::EncXipEc256.present() {
+            return false;
+        }
+
+        let mut flash = self.flash.clone();
+        let mut fails = 0;
+
+        info!("Try imgtool XIP validation");
+
+        let slot = &self.images[0].slots[0];
+        let slot_size = slot.len;
+
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let repo_root = std::path::Path::new(manifest_dir).parent().unwrap();
+        let imgtool = repo_root.join("scripts").join("imgtool.py");
+        let enc_pubkey = repo_root.join("enc-ec256-pub.pem");
+        let scripts_dir = repo_root.join("scripts");
+
+        if !imgtool.exists() || !enc_pubkey.exists() {
+            warn!("Skipping imgtool validation: files not found");
+            return false;
+        }
+
+        let input_path = scripts_dir.join("_xip_test_input.bin");
+        let output_path = scripts_dir.join("_xip_test_output.bin");
+        std::fs::write(&input_path, vec![0u8; 4096]).unwrap();
+
+        fn to_win_path(p: &std::path::Path) -> String {
+            let s = p.to_string_lossy();
+            if s.starts_with("/mnt/") && s.len() > 6
+                && s.as_bytes()[5].is_ascii_alphabetic()
+            {
+                let drive = s.as_bytes()[5].to_ascii_uppercase() as char;
+                format!("{}:{}", drive, s[6..].replace('/', "\\"))
+            } else {
+                s.to_string()
+            }
+        }
+
+        let slot_size_str = format!("{:#x}", slot_size);
+        let mut imgtool_ok = false;
+
+        for python in &["python3", "python"] {
+            if let Ok(s) = Command::new(python)
+                .arg(&imgtool).arg("sign")
+                .arg("--encrypt-xip").arg(&enc_pubkey)
+                .arg("--pad-header")
+                .arg("--header-size").arg("32")
+                .arg("--slot-size").arg(&slot_size_str)
+                .arg("--version").arg("1.0.0")
+                .arg(&input_path).arg(&output_path)
+                .status()
+            {
+                if s.success() { imgtool_ok = true; break; }
+            }
+        }
+        if !imgtool_ok {
+            if let Ok(s) = Command::new("python.exe")
+                .arg(to_win_path(&imgtool)).arg("sign")
+                .arg("--encrypt-xip").arg(to_win_path(&enc_pubkey))
+                .arg("--pad-header")
+                .arg("--header-size").arg("32")
+                .arg("--slot-size").arg(&slot_size_str)
+                .arg("--version").arg("1.0.0")
+                .arg(to_win_path(&input_path))
+                .arg(to_win_path(&output_path))
+                .status()
+            {
+                if s.success() { imgtool_ok = true; }
+            }
+        }
+        if !imgtool_ok {
+            warn!("Skipping: imgtool not available");
+            let _ = std::fs::remove_file(&input_path);
+            return false;
+        }
+
+        let image_data = match std::fs::read(&output_path) {
+            Ok(d) => d,
+            Err(e) => {
+                error!("Failed to read imgtool output: {}", e);
+                let _ = std::fs::remove_file(&input_path);
+                return true;
+            }
+        };
+
+        let dev_id = slot.dev_id;
+        let offset = slot.base_off;
+        {
+            let dev = flash.get_mut(&dev_id).unwrap();
+            dev.erase(offset, slot_size).unwrap();
+            let mut padded = image_data.clone();
+            padded.resize(slot_size, dev.erased_val());
+            dev.write(offset, &padded).unwrap();
+        }
+
+        // Run boot_go -- C-side validates the image via boot_image_check_hook
+        if !c::boot_go(&mut flash, &self.areadesc, None, None, false).success() {
+            warn!("boot_go() rejected imgtool XIP-encrypted image");
+            fails += 1;
+        }
+
+        let _ = std::fs::remove_file(&input_path);
+        let _ = std::fs::remove_file(&output_path);
+
+        if fails > 0 {
+            error!("imgtool XIP validation failed");
         }
 
         fails > 0
@@ -2009,24 +2244,84 @@ fn install_image(flash: &mut SimMultiFlash, areadesc: &AreaDesc, slots: &[SlotIn
     // Generate encrypted images
     let flag = TlvFlags::ENCRYPTED_AES128 as u32 | TlvFlags::ENCRYPTED_AES256 as u32;
     let is_encrypted = (tlv.get_flags() & flag) != 0;
+    let is_xip_encrypted = Caps::EncXipEc256.present() && is_encrypted;
     let mut b_encimg = vec![];
     if is_encrypted {
         let flag = TlvFlags::ENCRYPTED_AES256 as u32;
         let aes256 = (tlv.get_flags() & flag) == flag;
         tlv.generate_enc_key();
         let enc_key = tlv.get_enc_key();
-        let nonce = GenericArray::from_slice(&[0; 16]);
-        b_encimg = b_img.clone();
-        if aes256 {
-            let key: &GenericArray<u8, U32> = GenericArray::from_slice(enc_key.as_slice());
-            let block = Aes256::new(&key);
-            let mut cipher = Aes256Ctr::from_block_cipher(block, &nonce);
-            cipher.apply_keystream(&mut b_encimg);
-        } else {
+
+        if is_xip_encrypted {
+            // XIP encryption: use offset-based AES-CTR counters.
+            // The counter for each 16-byte block is derived from the absolute
+            // offset within the flash area (starting at 0 = beginning of header).
+            // For payload bytes at flash area offset `off`:
+            //   ctr = off >> 4
+            //   blk_off = off & 0xf
+            // This matches the C boot_decrypt_xip() implementation.
+            b_encimg = b_img.clone();
             let key: &GenericArray<u8, U16> = GenericArray::from_slice(enc_key.as_slice());
-            let block = Aes128::new(&key);
-            let mut cipher = Aes128Ctr::from_block_cipher(block, &nonce);
-            cipher.apply_keystream(&mut b_encimg);
+            let iv_vec = tlv.get_enc_iv();
+            let iv = if iv_vec.is_empty() {
+                [0u8; 16]
+            } else {
+                let mut arr = [0u8; 16];
+                arr.copy_from_slice(&iv_vec);
+                arr
+            };
+
+            // Encrypt each 16-byte aligned block of the payload.
+            // Payload starts at offset HDR_SIZE within the flash area image.
+            let payload_len = b_encimg.len();
+            let mut pos = 0usize;
+            while pos < payload_len {
+                // Flash area offset for this byte = HDR_SIZE + pos
+                let flash_off = HDR_SIZE + pos;
+                let ctr = (flash_off >> 4) as u32;
+
+                // Build the nonce: iv[0..12] || ctr_be32
+                let mut nonce = [0u8; 16];
+                nonce[..12].copy_from_slice(&iv[..12]);
+                nonce[12] = (ctr >> 24) as u8;
+                nonce[13] = (ctr >> 16) as u8;
+                nonce[14] = (ctr >> 8) as u8;
+                nonce[15] = ctr as u8;
+
+                let blk_off = flash_off & 0xf;
+
+                // Encrypt one AES block worth of data using AES-CTR at this counter.
+                // We create a fresh CTR cipher per block to set the exact counter.
+                let nonce_ga = GenericArray::from_slice(&nonce);
+                let block_cipher = Aes128::new(key);
+                let mut cipher = Aes128Ctr::from_block_cipher(block_cipher, nonce_ga);
+
+                // If blk_off != 0, we need to skip blk_off bytes of keystream
+                if blk_off > 0 {
+                    let mut discard = vec![0u8; blk_off];
+                    cipher.apply_keystream(&mut discard);
+                }
+
+                // Encrypt from pos up to the end of this AES block (or end of data)
+                let bytes_in_block = std::cmp::min(16 - blk_off, payload_len - pos);
+                cipher.apply_keystream(&mut b_encimg[pos..pos + bytes_in_block]);
+                pos += bytes_in_block;
+            }
+        } else {
+            // Standard encryption: AES-CTR with counter starting at 0
+            let nonce = GenericArray::from_slice(&[0; 16]);
+            b_encimg = b_img.clone();
+            if aes256 {
+                let key: &GenericArray<u8, U32> = GenericArray::from_slice(enc_key.as_slice());
+                let block = Aes256::new(&key);
+                let mut cipher = Aes256Ctr::from_block_cipher(block, &nonce);
+                cipher.apply_keystream(&mut b_encimg);
+            } else {
+                let key: &GenericArray<u8, U16> = GenericArray::from_slice(enc_key.as_slice());
+                let block = Aes128::new(&key);
+                let mut cipher = Aes128Ctr::from_block_cipher(block, &nonce);
+                cipher.apply_keystream(&mut b_encimg);
+            }
         }
     }
 
@@ -2067,7 +2362,23 @@ fn install_image(flash: &mut SimMultiFlash, areadesc: &AreaDesc, slots: &[SlotIn
     // In the case of ram-load when encryption is enabled both slots have to
     // be encrypted so in the event when the image is in the primary slot
     // the verification will fail as the image is not encrypted.
-    if slot.index == 0 && !Caps::RamLoad.present() {
+    //
+    // For XIP encryption, both primary and secondary slots contain the
+    // encrypted image (XIP executes directly from encrypted flash).
+    if is_xip_encrypted {
+        // XIP: write encrypted image to whichever slot we're installing into.
+        // Both slots get the same encrypted content.
+        dev.write(offset, &encbuf).unwrap();
+
+        let mut enc = vec![0u8; encbuf.len()];
+        dev.read(offset, &mut enc).unwrap();
+
+        ImageData {
+            size: image_sz,
+            plain: buf,
+            cipher: Some(enc),
+        }
+    } else if slot.index == 0 && !Caps::RamLoad.present() {
         let enc_copy: Option<Vec<u8>>;
 
         if is_encrypted {
@@ -2151,6 +2462,8 @@ fn make_tlv() -> TlvGen {
         } else {
             TlvGen::new_enc_rsa(aes_key_size)
         }
+    } else if Caps::EncXipEc256.present() {
+        TlvGen::new_xip_ecies_p256()
     } else if Caps::EncEc256.present() {
         if Caps::EcdsaP256.present() {
             TlvGen::new_ecdsa_ecies_p256(aes_key_size)
@@ -2184,9 +2497,16 @@ fn make_tlv() -> TlvGen {
 impl ImageData {
     /// Find the image contents for the given slot.  This assumes that slot 0
     /// is unencrypted, and slot 1 is encrypted.
+    /// For XIP encryption, both slots contain encrypted data.
     fn find(&self, slot: usize) -> &Vec<u8> {
+        let xip_encrypted = Caps::EncXipEc256.present();
         let encrypted = Caps::EncRsa.present() || Caps::EncKw.present() ||
-            Caps::EncEc256.present() || Caps::EncX25519.present();
+            Caps::EncEc256.present() || Caps::EncX25519.present() ||
+            xip_encrypted;
+        if xip_encrypted {
+            // XIP: both slots have encrypted image
+            return self.cipher.as_ref().expect("Invalid image");
+        }
         match (encrypted, slot) {
             (false, _) => &self.plain,
             (true, 0) => &self.plain,

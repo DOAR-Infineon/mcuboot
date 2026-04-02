@@ -190,3 +190,121 @@ required keys.
 * If using AES-KW (`newt` only), the `kek` can be generated with a
   command like (change count to 32 for a 256 bit key)
   `dd if=/dev/urandom bs=1 count=16 | base64 > my_kek.b64`
+
+## [XIP Encryption (Hardware-Accelerated)](#xip-encryption-hardware-accelerated)
+
+### Overview
+
+Standard `MCUboot` encryption decrypts images during the swap process so that
+the `primary slot` always contains plaintext. This works well for internal flash
+but prevents execute-in-place (XIP) from external memory, because decrypted
+data would be exposed on the external bus.
+
+XIP encryption keeps images encrypted in **all** slots. A hardware crypto engine
+(e.g., Infineon SMIF with on-the-fly AES decryption) provides transparent
+decryption during code execution. The CPU fetches ciphertext from flash and the
+hardware returns plaintext -- no software decryption step is needed at runtime.
+
+### Configuration
+
+Enable XIP encryption with the following defines:
+
+```c
+#define MCUBOOT_ENC_IMAGES_XIP
+#define MCUBOOT_IMAGE_ACCESS_HOOKS
+```
+
+Do **not** define `MCUBOOT_ENC_IMAGES`. The standard software encryption path
+is not used; the platform library handles image validation and key extraction
+independently through the hook interface.
+
+### How it works
+
+1. **Build-time encryption** -- Images are encrypted by `imgtool` using
+   AES-CTR, targeted at the primary slot address. The AES-CTR counter is
+   computed as:
+
+   ```
+   counter = (encryption_address + offset) / 16
+   ```
+
+   where `offset` is the byte offset within the image payload. This
+   offset-based scheme allows the hardware crypto engine to decrypt any
+   block independently.
+
+2. **Identical ciphertext in both slots** -- Because encryption is tied to a
+   fixed address (the primary slot), both the primary and secondary slots
+   store the same ciphertext. There is no slot-specific re-encryption.
+
+3. **Swap copies raw bytes** -- During an upgrade, swap moves encrypted blocks
+   between slots without any encryption or decryption. The data is byte-for-byte
+   identical regardless of which slot it resides in.
+
+4. **Post-boot hardware setup** -- After `boot_go()` returns, the application
+   startup code configures hardware crypto regions for each image. The AES key
+   and IV are available in the `boot_rsp` structure:
+
+   ```c
+   struct boot_rsp rsp;
+   /* ... boot_go(&rsp) ... */
+
+   /* rsp.xip_key[4] -- 16-byte AES-128 key */
+   /* rsp.xip_iv[4]  -- 16-byte IV/nonce     */
+   ```
+
+5. **Key extraction from TLV** -- During image validation, the platform's
+   `boot_image_check_hook()` decrypts the ECIES TLV to obtain the AES key
+   and IV. These keys are held in RAM only for the duration of boot and are
+   never persisted to flash.
+
+### Platform requirements
+
+A platform using XIP encryption must provide the following hook functions:
+
+* **`boot_image_check_hook(img_index, slot)`** -- Performs complete image
+  validation including hash verification over decrypted content and ECIES TLV
+  processing. Returns `FIH_SUCCESS` if the image is valid, `FIH_FAILURE`
+  otherwise. This replaces the standard `MCUboot` validation path.
+
+  ```c
+  fih_ret boot_image_check_hook(int img_index, int slot);
+  ```
+
+* **`boot_xip_populate_rsp(img_index, rsp)`** -- Called after successful
+  validation to copy the extracted AES key and IV into the `boot_rsp`
+  structure. The application uses these values to configure hardware crypto
+  regions.
+
+  ```c
+  void boot_xip_populate_rsp(int img_index, struct boot_rsp *rsp);
+  ```
+
+* **Hardware crypto setup** -- After `boot_go()` returns, the application
+  must configure the hardware crypto engine (e.g., SMIF crypto regions) using
+  the key material from `boot_rsp` before jumping to the application image.
+
+### Multi-key model
+
+When multiple images are used (`MCUBOOT_IMAGE_NUMBER > 1`), each image carries
+its own independent AES key and IV in its ECIES TLV. The hardware crypto engine
+must support multiple decryption regions -- one per image -- to allow
+simultaneous XIP execution from different flash areas.
+
+The `boot_rsp` structure carries key material for the current image. The
+platform's startup code is responsible for collecting keys from all images and
+configuring a separate crypto region for each one.
+
+### Security considerations
+
+* **No plaintext keys in flash** -- AES keys exist only in RAM during the boot
+  process and in hardware crypto registers after configuration.
+* **Key zeroization** -- `MCUboot` clears the `boot_status` structure
+  (which may hold plaintext key material) before jumping to the application.
+  Platforms should zeroize any additional key buffers after hardware crypto
+  setup is complete.
+* **ECIES-P256 wrapping** -- The per-image AES key is protected using
+  ECIES-P256 in the image TLV, requiring the device's private key for
+  extraction.
+* **FIH hardening** -- The `boot_image_check_hook()` return path uses
+  `MCUboot`'s fault injection hardening (FIH) to protect against glitch
+  attacks on the validation result.

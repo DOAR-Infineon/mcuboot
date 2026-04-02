@@ -88,6 +88,10 @@ pub fn boot_go(multiflash: &mut SimMultiFlash, areadesc: &AreaDesc,
         br_hdr: std::ptr::null(),
         flash_dev_id: 0,
         image_off: 0,
+        #[cfg(feature = "enc-xip-ec256")]
+        br_xip_key: [0u32; 4],
+        #[cfg(feature = "enc-xip-ec256")]
+        br_xip_iv: [0u32; 4],
     };
     let result: i32 = unsafe {
         let adesc = areadesc.get_c();

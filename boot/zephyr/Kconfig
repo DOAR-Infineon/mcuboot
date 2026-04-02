@@ -861,6 +861,19 @@ config BOOT_ENCRYPTION_KEY_FILE
 	  e.g. \${CMAKE_CURRENT_LIST_DIR} will allow referencing a file in that directory, these
 	  will be automatically configured by the build system.
 
+config BOOT_ENCRYPT_XIP
+	bool "XIP encryption (hardware-accelerated)"
+	depends on BOOT_IMAGE_ACCESS_HOOKS
+	help
+	  Keep images encrypted in both primary and secondary slots.
+	  Hardware crypto provides transparent XIP decryption at runtime.
+
+	  The platform must provide boot_image_check_hook() for image
+	  validation and boot_xip_populate_rsp() for key propagation.
+
+	  This does not require BOOT_ENCRYPT_IMAGE. The platform
+	  library handles all encryption independently.
+
 config BOOT_MAX_IMG_SECTORS_AUTO
 	bool "Calculate maximum sectors automatically"
 	default y

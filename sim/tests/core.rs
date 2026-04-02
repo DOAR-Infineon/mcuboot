@@ -190,6 +190,39 @@ pub static TEST_DEPS: &[DepTest] = &[
     },
 ];
 
+// XIP encryption tests (ECIES-P256).
+// When enc-xip-ec256 is enabled, make_tlv() selects TlvGen::new_xip_ecies_p256()
+// and ImageData::find() returns encrypted content for both slots. The existing
+// run_* helpers work unchanged because swap is a raw copy with XIP encryption.
+
+#[cfg(feature = "enc-xip-ec256")]
+sim_test!(xip_enc_basic_boot, make_no_upgrade_image(&NO_DEPS, ImageManipulation::None), run_norevert_newimage());
+
+#[cfg(feature = "enc-xip-ec256")]
+sim_test!(xip_enc_upgrade_revert, make_image(&NO_DEPS, true), run_basic_revert());
+
+#[cfg(feature = "enc-xip-ec256")]
+sim_test!(xip_enc_permanent_upgrade, make_image(&NO_DEPS, true), run_norevert());
+
+#[cfg(feature = "enc-xip-ec256")]
+sim_test!(xip_enc_swap_not_decrypted, make_image(&NO_DEPS, true), run_xip_swap_not_decrypted());
+
+#[cfg(feature = "enc-xip-ec256")]
+sim_test!(xip_enc_revert_with_fails, make_image(&NO_DEPS, false), run_revert_with_fails());
+
+#[cfg(feature = "enc-xip-ec256")]
+sim_test!(xip_enc_perm_with_fails, make_image(&NO_DEPS, true), run_perm_with_fails());
+
+/// Validate that an imgtool-generated XIP-encrypted image is accepted by the
+/// C-side boot_image_check_hook (ECIES unwrap + SHA-256 hash verification).
+///
+/// Uses the existing sim_test infrastructure to get a valid flash/areadesc,
+/// then overwrites the primary slot with an imgtool-generated image.
+#[cfg(feature = "enc-xip-ec256")]
+sim_test!(xip_enc_imgtool_validation,
+          make_no_upgrade_image(&NO_DEPS, ImageManipulation::None),
+          run_imgtool_xip_validation());
+
 /// Counter for the image number.
 static IMAGE_NUMBER: AtomicUsize = AtomicUsize::new(0);
 
