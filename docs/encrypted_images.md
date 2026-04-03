@@ -270,10 +270,31 @@ exclusive with `BOOT_ENCRYPT_IMAGE` (standard software encryption).
    /* rsp.xip_iv[4]  -- 16-byte IV/nonce     */
    ```
 
-7. **Key extraction from TLV** -- During image validation, the platform's
-   `boot_image_check_hook()` decrypts the ECIES TLV to obtain the AES key
-   and IV. These keys are held in RAM only for the duration of boot and are
-   never persisted to flash.
+7. **Bootloader validation flow** -- The `boot_image_check_hook()` validates
+   encrypted XIP images without software decryption:
+   1. Compute SHA-256 over raw flash (header + ciphertext + protected TLVs)
+   2. Verify hash against `IMAGE_TLV_SHA256`
+   3. Verify mandatory ECDSA-P256 signature against `IMAGE_TLV_ECDSA_SIG`
+   4. ECIES-P256 key unwrap from `IMAGE_TLV_ENC_EC256` to extract AES key/IV
+
+   The extracted keys are held in RAM only for the duration of boot and are
+   cleared before jumping to the application.
+
+8. **imgtool image creation** -- The `imgtool sign --encrypt-xip` command
+   creates XIP images by encrypting the payload **before** computing the
+   hash and signature:
+   1. Encrypt image body with AES-CTR (edgeprotecttools format)
+   2. Append protected TLVs (not encrypted)
+   3. Compute SHA-256 over header + ciphertext + protected TLVs
+   4. Sign the hash with ECDSA-P256 (same as for non-encrypted images)
+   5. Add unprotected TLVs: SHA-256, ECDSA signature, key hash, ECIES envelope
+
+   A signing key (`--key`) is mandatory when using `--encrypt-xip`.
+
+   A standalone verification script is provided at `scripts/verify_xip_image.py`:
+   ```
+   python verify_xip_image.py image.bin --sign-key root-ec-p256.pem --enc-key enc-ec256-priv.pem
+   ```
 
 ### Extended ECIES TLV format
 

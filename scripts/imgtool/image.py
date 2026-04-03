@@ -755,9 +755,12 @@ class Image:
 
             protected_tlv_off = len(self.payload)
 
-            self.payload += prot_tlv.get()
-
-        # --- XIP: encrypt payload before hash/sign (ciphertext signing) ---
+        # --- XIP: encrypt image body before hash/sign (ciphertext signing) ---
+        # Follows the same pattern as standard encryption:
+        #   1. Encrypt self.payload[header_size:] (image body only, no prot TLVs)
+        #   2. Re-append protected TLVs after encryption
+        # After encryption, the standard hash/sign flow runs on self.payload
+        # treating the encrypted body as ordinary plaintext.
         xip_enc_tlv_data = None
         if xip_mode and enckey is not None and not dont_encrypt:
             plainkey = os.urandom(16)
@@ -766,11 +769,15 @@ class Image:
                 self.ecies_hkdf_xip(enckey, plainkey)
             xip_enc_tlv_data = pubk + mac + cipherkey + salt + bytes(32)
 
-            # Encrypt payload in-place (before hash/sign)
-            img_data = bytes(self.payload[self.header_size:])
+            # Encrypt image body (same as standard: payload without prot TLVs)
+            img = bytes(self.payload[self.header_size:])
             encdata = Image._encrypt_xip_ecb(
-                img_data, plainkey, self.header_size, xip_iv[0:12])
+                img, plainkey, self.header_size, xip_iv[0:12])
             self.payload[self.header_size:] = encdata
+
+        # Append protected TLVs (after encryption, same as standard path)
+        if protected_tlv_off is not None:
+            self.payload += prot_tlv.get()
         # --- End XIP early encryption ---
 
         tlv = TLV(self.endian)

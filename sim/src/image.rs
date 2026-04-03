@@ -1282,9 +1282,10 @@ impl Images {
         let repo_root = std::path::Path::new(manifest_dir).parent().unwrap();
         let imgtool = repo_root.join("scripts").join("imgtool.py");
         let enc_pubkey = repo_root.join("enc-ec256-pub.pem");
+        let sign_key = repo_root.join("root-ec-p256.pem");
         let scripts_dir = repo_root.join("scripts");
 
-        if !imgtool.exists() || !enc_pubkey.exists() {
+        if !imgtool.exists() || !enc_pubkey.exists() || !sign_key.exists() {
             warn!("Skipping imgtool validation: files not found");
             return false;
         }
@@ -1308,9 +1309,11 @@ impl Images {
         let slot_size_str = format!("{:#x}", slot_size);
         let mut imgtool_ok = false;
 
+        // XIP images must be signed (ciphertext signing): pass --key
         for python in &["python3", "python"] {
             if let Ok(s) = Command::new(python)
                 .arg(&imgtool).arg("sign")
+                .arg("--key").arg(&sign_key)
                 .arg("--encrypt-xip").arg(&enc_pubkey)
                 .arg("--pad-header")
                 .arg("--header-size").arg("32")
@@ -1325,6 +1328,7 @@ impl Images {
         if !imgtool_ok {
             if let Ok(s) = Command::new("python.exe")
                 .arg(to_win_path(&imgtool)).arg("sign")
+                .arg("--key").arg(to_win_path(&sign_key))
                 .arg("--encrypt-xip").arg(to_win_path(&enc_pubkey))
                 .arg("--pad-header")
                 .arg("--header-size").arg("32")
