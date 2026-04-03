@@ -565,6 +565,30 @@ class Image:
 
         return cipherkey, ciphermac, pubk, salt, xip_iv
 
+    @staticmethod
+    def _encrypt_xip_ecb(data, key, initial_counter, nonce_12):
+        """AES-CTR via ECB+XOR, matching edgeprotecttools encrypt_ecb().
+
+        Nonce format (128-bit):
+            bits 0..31  = counter + initial_counter (little-endian)
+            bits 32..127 = nonce_12 (first 12 bytes of xip_iv)
+        Counter increments by 16 per AES block.
+        """
+        import struct
+        cipher = Cipher(algorithms.AES(key), modes.ECB())
+        encryptor = cipher.encryptor()
+        ciphertext = bytearray(len(data))
+        counter = 0
+        for i in range(0, len(data), 16):
+            block_in = struct.pack('<I', initial_counter + counter) + nonce_12[:12]
+            counter += 16
+            mask = encryptor.update(block_in)
+            chunk = data[i:i + 16]
+            for j in range(len(chunk)):
+                ciphertext[i + j] = chunk[j] ^ mask[j]
+        encryptor.finalize()
+        return bytes(ciphertext)
+
     def create(self, key, public_key_format, enckey, dependencies=None,
                sw_type=None, custom_tlvs=None, compression_tlvs=None,
                compression_type=None, encrypt_keylen=128, clear=False,
@@ -733,6 +757,22 @@ class Image:
 
             self.payload += prot_tlv.get()
 
+        # --- XIP: encrypt payload before hash/sign (ciphertext signing) ---
+        xip_enc_tlv_data = None
+        if xip_mode and enckey is not None and not dont_encrypt:
+            plainkey = os.urandom(16)
+            # Build ECIES extended TLV
+            cipherkey, mac, pubk, salt, xip_iv = \
+                self.ecies_hkdf_xip(enckey, plainkey)
+            xip_enc_tlv_data = pubk + mac + cipherkey + salt + bytes(32)
+
+            # Encrypt payload in-place (before hash/sign)
+            img_data = bytes(self.payload[self.header_size:])
+            encdata = Image._encrypt_xip_ecb(
+                img_data, plainkey, self.header_size, xip_iv[0:12])
+            self.payload[self.header_size:] = encdata
+        # --- End XIP early encryption ---
+
         tlv = TLV(self.endian)
 
         # These signature is done over sha of image. In case of
@@ -797,73 +837,62 @@ class Image:
             self.payload = self.payload[:protected_tlv_off]
 
         if enckey is not None and dont_encrypt is False:
-            if encrypt_keylen == 256:
-                plainkey = os.urandom(32)
+            if xip_mode and xip_enc_tlv_data is not None:
+                # XIP: payload already encrypted above (before hash/sign);
+                # just add the ECIES TLV here.
+                self.enctlv_len = len(xip_enc_tlv_data)
+                tlv.add('ENCEC256', xip_enc_tlv_data)
             else:
-                plainkey = os.urandom(16)
-
-            if not isinstance(enckey, rsa.RSAPublic):
-                if hmac_sha == 'auto' or hmac_sha == '256':
-                    hmac_sha = '256'
-                    hmac_sha_alg = hashes.SHA256()
-                elif hmac_sha == '512':
-                    if not isinstance(enckey, x25519.X25519Public):
-                        raise click.UsageError(
-                            "Currently only ECIES-X25519 supports HMAC-SHA512")
-                    hmac_sha_alg = hashes.SHA512()
+                # Standard encryption path (encrypt after hash/sign)
+                if encrypt_keylen == 256:
+                    plainkey = os.urandom(32)
                 else:
-                    raise click.UsageError("Unsupported HMAC-SHA")
+                    plainkey = os.urandom(16)
 
-            xip_iv = None
-            if isinstance(enckey, rsa.RSAPublic):
-                cipherkey = enckey._get_public().encrypt(
-                    plainkey, padding.OAEP(
-                        mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                        algorithm=hashes.SHA256(),
-                        label=None))
-                self.enctlv_len = len(cipherkey)
-                tlv.add('ENCRSA2048', cipherkey)
-            elif isinstance(enckey, ecdsa.ECDSA256P1Public) and xip_mode:
-                # XIP: extended ECIES TLV (177 bytes)
-                cipherkey, mac, pubk, salt, xip_iv = \
-                    self.ecies_hkdf_xip(enckey, plainkey)
-                # 177 bytes: pubk(65) + mac(32) + cipherkey(16) + salt(32) + padding(32)
-                enctlv = pubk + mac + cipherkey + salt + bytes(32)
-                self.enctlv_len = len(enctlv)
-                assert len(enctlv) == 177
-                tlv.add('ENCEC256', enctlv)
-            elif isinstance(enckey, ecdsa.ECDSA256P1Public):
-                # Standard: ECIES TLV (113 bytes)
-                cipherkey, mac, pubk = self.ecies_hkdf(enckey, plainkey, hmac_sha_alg)
-                enctlv = pubk + mac + cipherkey
-                self.enctlv_len = len(enctlv)
-                tlv.add('ENCEC256', enctlv)
-            elif isinstance(enckey, x25519.X25519Public):
-                cipherkey, mac, pubk = self.ecies_hkdf(enckey, plainkey, hmac_sha_alg)
-                enctlv = pubk + mac + cipherkey
-                self.enctlv_len = len(enctlv)
-                if (hmac_sha == '256'):
-                    tlv.add('ENCX25519', enctlv)
-                else:
-                    tlv.add('ENCX25519_SHA512', enctlv)
+                if not isinstance(enckey, rsa.RSAPublic):
+                    if hmac_sha == 'auto' or hmac_sha == '256':
+                        hmac_sha = '256'
+                        hmac_sha_alg = hashes.SHA256()
+                    elif hmac_sha == '512':
+                        if not isinstance(enckey, x25519.X25519Public):
+                            raise click.UsageError(
+                                "Currently only ECIES-X25519 supports HMAC-SHA512")
+                        hmac_sha_alg = hashes.SHA512()
+                    else:
+                        raise click.UsageError("Unsupported HMAC-SHA")
 
-            if not clear:
-                if xip_mode and xip_iv is not None:
-                    # XIP: offset-based AES-CTR
-                    # Counter starts at (header_size >> 4) and increments per block.
-                    # This matches boot_decrypt_xip() nonce construction:
-                    #   nonce = xip_iv[0:12] || (off >> 4) as BE32
-                    initial_ctr = self.header_size >> 4
-                    nonce = xip_iv[0:12] + initial_ctr.to_bytes(4, 'big')
-                else:
+                if isinstance(enckey, rsa.RSAPublic):
+                    cipherkey = enckey._get_public().encrypt(
+                        plainkey, padding.OAEP(
+                            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                            algorithm=hashes.SHA256(),
+                            label=None))
+                    self.enctlv_len = len(cipherkey)
+                    tlv.add('ENCRSA2048', cipherkey)
+                elif isinstance(enckey, ecdsa.ECDSA256P1Public):
+                    # Standard: ECIES TLV (113 bytes)
+                    cipherkey, mac, pubk = self.ecies_hkdf(enckey, plainkey, hmac_sha_alg)
+                    enctlv = pubk + mac + cipherkey
+                    self.enctlv_len = len(enctlv)
+                    tlv.add('ENCEC256', enctlv)
+                elif isinstance(enckey, x25519.X25519Public):
+                    cipherkey, mac, pubk = self.ecies_hkdf(enckey, plainkey, hmac_sha_alg)
+                    enctlv = pubk + mac + cipherkey
+                    self.enctlv_len = len(enctlv)
+                    if (hmac_sha == '256'):
+                        tlv.add('ENCX25519', enctlv)
+                    else:
+                        tlv.add('ENCX25519_SHA512', enctlv)
+
+                if not clear:
                     # Standard: flat zero nonce
                     nonce = bytes([0] * 16)
-                cipher = Cipher(algorithms.AES(plainkey), modes.CTR(nonce),
-                                backend=default_backend())
-                encryptor = cipher.encryptor()
-                img = bytes(self.payload[self.header_size:])
-                self.payload[self.header_size:] = \
-                    encryptor.update(img) + encryptor.finalize()
+                    cipher = Cipher(algorithms.AES(plainkey), modes.CTR(nonce),
+                                    backend=default_backend())
+                    encryptor = cipher.encryptor()
+                    img = bytes(self.payload[self.header_size:])
+                    self.payload[self.header_size:] = \
+                        encryptor.update(img) + encryptor.finalize()
 
         self.payload += prot_tlv.get()
         self.payload += tlv.get()

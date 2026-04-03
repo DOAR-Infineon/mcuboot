@@ -29,6 +29,8 @@ use aes::{
     NewBlockCipher,
 };
 use cipher::{
+    BlockCipher,
+    BlockEncrypt,
     FromBlockCipher,
     generic_array::GenericArray,
     StreamCipher,
@@ -1027,6 +1029,104 @@ impl Images {
             error!("XIP swap validation: {} checks failed", fails);
         } else {
             info!("XIP swap validation: all checks passed");
+        }
+
+        fails > 0
+    }
+
+    /// XIP overwrite validation: verify images remain encrypted after
+    /// overwrite-only upgrade and the bootloader can still boot them.
+    ///
+    /// Checks:
+    /// 1. After overwrite, primary slot contains the upgrade's CIPHERTEXT
+    /// 2. After overwrite, primary payload differs from plaintext (no decryption)
+    /// 3. A second boot succeeds (proving the overwritten image is valid)
+    /// 4. After second boot, primary still has ciphertext
+    #[cfg(feature = "enc-xip-ec256")]
+    pub fn run_xip_overwrite_not_decrypted(&self) -> bool {
+        if !Caps::EncXipEc256.present() || !Caps::OverwriteUpgrade.present() {
+            return false;
+        }
+
+        let mut flash = self.flash.clone();
+        let mut fails = 0;
+
+        info!("XIP overwrite validation: checking images stay encrypted after overwrite");
+
+        // First boot: triggers overwrite (copy secondary to primary)
+        if !c::boot_go(&mut flash, &self.areadesc, None, None, false).success() {
+            warn!("Failed first boot (overwrite)");
+            fails += 1;
+        }
+
+        for image in &self.images {
+            let primary = &image.slots[0];
+
+            // Read what's now in the primary slot after overwrite
+            let primary_size = image.upgrades.plain.len();
+            let mut primary_contents = vec![0u8; primary_size];
+            let dev = flash.get(&primary.dev_id).unwrap();
+            dev.read(primary.base_off, &mut primary_contents).unwrap();
+
+            // The upgrade's ciphertext (what should be in primary after overwrite)
+            let expected_cipher = image.upgrades.cipher.as_ref()
+                .expect("XIP test requires encrypted images");
+
+            // The upgrade's plaintext (what must NOT be in primary)
+            let upgrade_plain = &image.upgrades.plain;
+
+            // CHECK 1: Primary slot matches the upgrade's ciphertext
+            if &primary_contents[..] != &expected_cipher[..] {
+                warn!("FAIL: Primary slot after overwrite does not match upgrade ciphertext");
+                fails += 1;
+            } else {
+                info!("OK: Primary slot contains upgrade ciphertext after overwrite");
+            }
+
+            // CHECK 2: Primary payload differs from plaintext
+            // (Compare payload portion only — header is the same in both)
+            let hdr_size = 32usize; // HDR_SIZE
+            if primary_size > hdr_size {
+                let payload_cipher = &primary_contents[hdr_size..];
+                let payload_plain = &upgrade_plain[hdr_size..];
+                if payload_cipher == payload_plain {
+                    warn!("FAIL: Primary payload matches plaintext — image was decrypted during overwrite!");
+                    fails += 1;
+                } else {
+                    info!("OK: Primary payload differs from plaintext (still encrypted)");
+                }
+            }
+        }
+
+        // CHECK 3: Second boot must succeed
+        if !c::boot_go(&mut flash, &self.areadesc, None, None, false).success() {
+            warn!("FAIL: Second boot failed — overwritten encrypted image is not valid");
+            fails += 1;
+        } else {
+            info!("OK: Second boot succeeds with overwritten encrypted image");
+        }
+
+        // CHECK 4: After second boot, primary still has ciphertext
+        for image in &self.images {
+            let primary = &image.slots[0];
+            let primary_size = image.upgrades.plain.len();
+            let mut primary_contents = vec![0u8; primary_size];
+            let dev = flash.get(&primary.dev_id).unwrap();
+            dev.read(primary.base_off, &mut primary_contents).unwrap();
+
+            let expected_cipher = image.upgrades.cipher.as_ref().unwrap();
+            if &primary_contents[..] != &expected_cipher[..] {
+                warn!("FAIL: Primary slot changed after second boot (should remain encrypted)");
+                fails += 1;
+            } else {
+                info!("OK: Primary slot still encrypted after second boot");
+            }
+        }
+
+        if fails > 0 {
+            error!("XIP overwrite validation: {} checks failed", fails);
+        } else {
+            info!("XIP overwrite validation: all checks passed");
         }
 
         fails > 0
@@ -2223,8 +2323,6 @@ fn install_image(flash: &mut SimMultiFlash, areadesc: &AreaDesc, slots: &[SlotIn
     b_header[..32].clone_from_slice(header.as_raw());
     assert_eq!(b_header.len(), HDR_SIZE);
 
-    tlv.add_bytes(&b_header);
-
     // The core of the image itself is just pseudorandom data.
     let mut b_img = vec![0; len];
     splat(&mut b_img, offset);
@@ -2238,76 +2336,76 @@ fn install_image(flash: &mut SimMultiFlash, areadesc: &AreaDesc, slots: &[SlotIn
         writeln!(&mut wr, "version: {:?}", deps.my_version(offset, slot.index)).unwrap();
     }
 
-    // TLV signatures work over plain image
-    tlv.add_bytes(&b_img);
-
     // Generate encrypted images
     let flag = TlvFlags::ENCRYPTED_AES128 as u32 | TlvFlags::ENCRYPTED_AES256 as u32;
     let is_encrypted = (tlv.get_flags() & flag) != 0;
     let is_xip_encrypted = Caps::EncXipEc256.present() && is_encrypted;
     let mut b_encimg = vec![];
-    if is_encrypted {
+
+    if is_xip_encrypted {
+        // XIP: encrypt FIRST, then hash/sign the ciphertext
         let flag = TlvFlags::ENCRYPTED_AES256 as u32;
-        let aes256 = (tlv.get_flags() & flag) == flag;
+        let _aes256 = (tlv.get_flags() & flag) == flag;
         tlv.generate_enc_key();
         let enc_key = tlv.get_enc_key();
 
-        if is_xip_encrypted {
-            // XIP encryption: use offset-based AES-CTR counters.
-            // The counter for each 16-byte block is derived from the absolute
-            // offset within the flash area (starting at 0 = beginning of header).
-            // For payload bytes at flash area offset `off`:
-            //   ctr = off >> 4
-            //   blk_off = off & 0xf
-            // This matches the C boot_decrypt_xip() implementation.
-            b_encimg = b_img.clone();
-            let key: &GenericArray<u8, U16> = GenericArray::from_slice(enc_key.as_slice());
-            let iv_vec = tlv.get_enc_iv();
-            let iv = if iv_vec.is_empty() {
-                [0u8; 16]
-            } else {
-                let mut arr = [0u8; 16];
-                arr.copy_from_slice(&iv_vec);
-                arr
-            };
-
-            // Encrypt each 16-byte aligned block of the payload.
-            // Payload starts at offset HDR_SIZE within the flash area image.
-            let payload_len = b_encimg.len();
-            let mut pos = 0usize;
-            while pos < payload_len {
-                // Flash area offset for this byte = HDR_SIZE + pos
-                let flash_off = HDR_SIZE + pos;
-                let ctr = (flash_off >> 4) as u32;
-
-                // Build the nonce: iv[0..12] || ctr_be32
-                let mut nonce = [0u8; 16];
-                nonce[..12].copy_from_slice(&iv[..12]);
-                nonce[12] = (ctr >> 24) as u8;
-                nonce[13] = (ctr >> 16) as u8;
-                nonce[14] = (ctr >> 8) as u8;
-                nonce[15] = ctr as u8;
-
-                let blk_off = flash_off & 0xf;
-
-                // Encrypt one AES block worth of data using AES-CTR at this counter.
-                // We create a fresh CTR cipher per block to set the exact counter.
-                let nonce_ga = GenericArray::from_slice(&nonce);
-                let block_cipher = Aes128::new(key);
-                let mut cipher = Aes128Ctr::from_block_cipher(block_cipher, nonce_ga);
-
-                // If blk_off != 0, we need to skip blk_off bytes of keystream
-                if blk_off > 0 {
-                    let mut discard = vec![0u8; blk_off];
-                    cipher.apply_keystream(&mut discard);
-                }
-
-                // Encrypt from pos up to the end of this AES block (or end of data)
-                let bytes_in_block = std::cmp::min(16 - blk_off, payload_len - pos);
-                cipher.apply_keystream(&mut b_encimg[pos..pos + bytes_in_block]);
-                pos += bytes_in_block;
+        // --- XIP encryption (edgeprotecttools format) ---
+        b_encimg = b_img.clone();
+        let key: &GenericArray<u8, U16> = GenericArray::from_slice(enc_key.as_slice());
+        let iv_vec = tlv.get_enc_iv();
+        let iv_12: [u8; 12] = {
+            let mut arr = [0u8; 12];
+            if iv_vec.len() >= 12 {
+                arr.copy_from_slice(&iv_vec[..12]);
             }
-        } else {
+            arr
+        };
+
+        let block_cipher = Aes128::new(key);
+        let payload_len = b_encimg.len();
+        let mut counter: u32 = 0;
+        let initial_counter = HDR_SIZE as u32;
+        let mut pos = 0usize;
+
+        while pos < payload_len {
+            // Build nonce: counter_LE32 || iv[0:12]
+            let mut nonce_block = [0u8; 16];
+            let ctr_val = initial_counter + counter;
+            nonce_block[0] = (ctr_val & 0xff) as u8;
+            nonce_block[1] = ((ctr_val >> 8) & 0xff) as u8;
+            nonce_block[2] = ((ctr_val >> 16) & 0xff) as u8;
+            nonce_block[3] = ((ctr_val >> 24) & 0xff) as u8;
+            nonce_block[4..16].copy_from_slice(&iv_12);
+
+            // AES-ECB encrypt the nonce block to get keystream
+            let mut cipher_block = GenericArray::clone_from_slice(&nonce_block);
+            block_cipher.encrypt_block(&mut cipher_block);
+
+            // XOR with plaintext
+            let bytes_in_block = std::cmp::min(16, payload_len - pos);
+            for j in 0..bytes_in_block {
+                b_encimg[pos + j] ^= cipher_block[j];
+            }
+
+            pos += bytes_in_block;
+            counter += 16;
+        }
+        // --- End XIP encryption ---
+
+        // Hash/sign covers CIPHERTEXT for XIP
+        tlv.add_bytes(&b_header);
+        tlv.add_bytes(&b_encimg);
+    } else {
+        // Standard: hash/sign covers PLAINTEXT
+        tlv.add_bytes(&b_header);
+        tlv.add_bytes(&b_img);
+
+        if is_encrypted {
+            let flag = TlvFlags::ENCRYPTED_AES256 as u32;
+            let aes256 = (tlv.get_flags() & flag) == flag;
+            tlv.generate_enc_key();
+            let enc_key = tlv.get_enc_key();
+
             // Standard encryption: AES-CTR with counter starting at 0
             let nonce = GenericArray::from_slice(&[0; 16]);
             b_encimg = b_img.clone();

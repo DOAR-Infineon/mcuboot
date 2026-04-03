@@ -55,6 +55,10 @@
 #include "bootutil/enc_key.h"
 #endif
 
+#if defined(MCUBOOT_ENC_IMAGES_XIP)
+#include "xip_enc/xip_enc.h"
+#endif
+
 #if !defined(MCUBOOT_DIRECT_XIP) && !defined(MCUBOOT_RAM_LOAD)
 #include <os/os_malloc.h>
 #endif
@@ -1972,6 +1976,7 @@ context_boot_go(struct boot_loader_state *state, struct boot_rsp *rsp)
 
 #if defined(MCUBOOT_ENC_IMAGES_XIP)
     boot_xip_populate_rsp(BOOT_CURR_IMG(state), rsp);
+    xip_enc_clear_keys();
 #endif
 
     fih_rc = FIH_SUCCESS;
@@ -2460,6 +2465,7 @@ context_boot_go(struct boot_loader_state *state, struct boot_rsp *rsp)
 
 #if defined(MCUBOOT_ENC_IMAGES_XIP)
     boot_xip_populate_rsp(BOOT_CURR_IMG(state), rsp);
+    xip_enc_clear_keys();
 #endif
 
 close:

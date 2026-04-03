@@ -208,6 +208,9 @@ sim_test!(xip_enc_permanent_upgrade, make_image(&NO_DEPS, true), run_norevert())
 sim_test!(xip_enc_swap_not_decrypted, make_image(&NO_DEPS, true), run_xip_swap_not_decrypted());
 
 #[cfg(feature = "enc-xip-ec256")]
+sim_test!(xip_enc_overwrite_not_decrypted, make_image(&NO_DEPS, true), run_xip_overwrite_not_decrypted());
+
+#[cfg(feature = "enc-xip-ec256")]
 sim_test!(xip_enc_revert_with_fails, make_image(&NO_DEPS, false), run_revert_with_fails());
 
 #[cfg(feature = "enc-xip-ec256")]

@@ -243,25 +243,32 @@ fih_ret boot_image_check_hook(int img_index, int slot);
 ```
 
 Called by MCUboot during image validation in place of the default validation
-logic. The platform implementation must:
+logic. A default (weak) implementation is provided by the XIP encryption
+library (`xip_enc_validate.c`) that performs:
 
-1. Open the flash area for the given slot.
-2. Read the image header.
-3. Extract the encryption key from the ECIES TLV in the image trailer.
-4. Program the hardware crypto engine with the extracted key.
-5. Compute and verify the image hash, decrypting the payload through the
-   hardware crypto engine during the read.
-6. Verify the image signature.
+1. Compute SHA-256 hash over raw flash content (header + ciphertext +
+   protected TLVs). **No decryption occurs** --- the hash covers the
+   encrypted payload exactly as stored in flash.
+2. Verify the SHA-256 hash against `IMAGE_TLV_SHA256`.
+3. Verify the ECDSA-P256 signature against the hash (mandatory for
+   encrypted images --- unsigned encrypted images are rejected).
+4. Perform ECIES-P256 key unwrap from `IMAGE_TLV_ENC_EC256` to extract
+   the AES key and IV for later hardware crypto setup.
 
 The function returns one of the following values:
 
 * `FIH_SUCCESS` --- the image is valid.
 * `FIH_FAILURE` --- the image is invalid.
-* `FIH_BOOT_HOOK_REGULAR` --- fall through to MCUboot's default validation.
+* `FIH_BOOT_HOOK_REGULAR` --- fall through to MCUboot's default validation
+  (returned for non-encrypted images).
 
-The hook must handle both encrypted and non-encrypted images. When no ECIES
-TLV is present the image should be treated as unencrypted and validated
-without programming the hardware crypto engine.
+The hook handles both encrypted and non-encrypted images. When the image
+header does not have the encryption flag set, the hook returns
+`FIH_BOOT_HOOK_REGULAR` to defer to MCUboot's standard validation.
+
+Platforms may override the weak default with a strong implementation for
+FIH hardening or hardware-accelerated crypto (e.g., using a secure element
+for ECIES unwrap).
 
 #### Populating the boot response with key material
 
@@ -295,6 +302,20 @@ This step is platform-specific and lives outside of MCUboot's common code.
 
 ### Key design constraints
 
+* **No software decryption during validation** --- the hash and signature are
+  computed over the raw ciphertext in flash. The bootloader never decrypts image
+  data in software. The encryption key is only extracted (via ECIES unwrap) for
+  later hardware crypto setup.
+
+* **Ciphertext signing** --- images are encrypted before signing by `imgtool`
+  (or `edgeprotecttools`). The SHA-256 and ECDSA signature in the image TLVs
+  cover `header + ciphertext + protected TLVs`. This is the reverse of
+  standard MCUboot encryption (which signs plaintext, then encrypts).
+
+* **Mandatory signature** --- encrypted XIP images must be signed. The
+  bootloader rejects unsigned encrypted images to prevent XOR attacks on
+  known-plaintext ciphertext regions.
+
 * **No software encryption during swap** --- because `MCUBOOT_ENC_IMAGES` is
   not defined, swap operations copy raw bytes. The ciphertext is moved as-is
   between primary and secondary slots.
@@ -305,6 +326,6 @@ This step is platform-specific and lives outside of MCUboot's common code.
   structure passed to the platform at boot time.
 
 * **Mixed image support** --- the `boot_image_check_hook` implementation must
-  handle both encrypted and non-encrypted images. An image without an ECIES
-  TLV should be validated using the normal (unencrypted) hash and signature
-  checks, returning `FIH_SUCCESS` or `FIH_BOOT_HOOK_REGULAR` as appropriate.
+  handle both encrypted and non-encrypted images. An image without the
+  encryption flag is deferred to MCUboot's standard validation by returning
+  `FIH_BOOT_HOOK_REGULAR`.

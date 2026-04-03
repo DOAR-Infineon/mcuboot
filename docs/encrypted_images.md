@@ -218,29 +218,47 @@ Do **not** define `MCUBOOT_ENC_IMAGES`. The standard software encryption path
 is not used; the platform library handles image validation and key extraction
 independently through the hook interface.
 
+For Zephyr builds, enable `CONFIG_BOOT_ENCRYPT_IMAGE_XIP` in Kconfig. This
+option automatically selects `BOOT_IMAGE_ACCESS_HOOKS` and is mutually
+exclusive with `BOOT_ENCRYPT_IMAGE` (standard software encryption).
+
 ### How it works
 
-1. **Build-time encryption** -- Images are encrypted by `imgtool` using
-   AES-CTR, targeted at the primary slot address. The AES-CTR counter is
-   computed as:
+1. **Build-time encryption** -- Images are encrypted by `imgtool` (or
+   `edgeprotecttools`) using AES-CTR before signing. The AES-CTR counter
+   follows the edgeprotecttools format:
 
    ```
-   counter = (encryption_address + offset) / 16
+   AES-CTR block input = counter_LE32 || nonce[0:12]
    ```
 
-   where `offset` is the byte offset within the image payload. This
-   offset-based scheme allows the hardware crypto engine to decrypt any
-   block independently.
+   where `counter_LE32` is the flash-area-relative byte offset encoded as a
+   little-endian 32-bit integer, and `nonce[0:12]` is the first 12 bytes of the
+   HKDF-derived `xip_iv`. The counter is not slot-dependent; both the primary
+   and secondary slots store identical ciphertext.
 
-2. **Identical ciphertext in both slots** -- Because encryption is tied to a
-   fixed address (the primary slot), both the primary and secondary slots
-   store the same ciphertext. There is no slot-specific re-encryption.
+2. **Ciphertext signing** -- The SHA-256 hash and ECDSA signature are computed
+   over the encrypted image (header + ciphertext + protected TLVs). The
+   bootloader never performs software decryption during validation. Validating
+   over ciphertext means the signature covers the exact bytes that reside in
+   flash.
 
-3. **Swap copies raw bytes** -- During an upgrade, swap moves encrypted blocks
+3. **Mandatory signature** -- Encrypted XIP images must be signed. The
+   bootloader rejects unsigned encrypted images to prevent XOR attacks: an
+   attacker who knows plaintext at a given offset could XOR it against the
+   ciphertext to recover the keystream, then forge arbitrary content at that
+   offset. A mandatory signature closes this attack.
+
+4. **Identical ciphertext in both slots** -- Because encryption is tied to
+   flash-area-relative offsets (not slot-specific addresses), both the primary
+   and secondary slots store the same ciphertext. There is no slot-specific
+   re-encryption.
+
+5. **Swap copies raw bytes** -- During an upgrade, swap moves encrypted blocks
    between slots without any encryption or decryption. The data is byte-for-byte
    identical regardless of which slot it resides in.
 
-4. **Post-boot hardware setup** -- After `boot_go()` returns, the application
+6. **Post-boot hardware setup** -- After `boot_go()` returns, the application
    startup code configures hardware crypto regions for each image. The AES key
    and IV are available in the `boot_rsp` structure:
 
@@ -252,19 +270,46 @@ independently through the hook interface.
    /* rsp.xip_iv[4]  -- 16-byte IV/nonce     */
    ```
 
-5. **Key extraction from TLV** -- During image validation, the platform's
+7. **Key extraction from TLV** -- During image validation, the platform's
    `boot_image_check_hook()` decrypts the ECIES TLV to obtain the AES key
    and IV. These keys are held in RAM only for the duration of boot and are
    never persisted to flash.
+
+### Extended ECIES TLV format
+
+XIP images use an extended ECIES TLV (177 bytes) that adds a 32-byte HKDF
+salt field beyond the standard ECIES-P256 layout:
+
+```
+[ ephemeral_pubkey (65 bytes) | hmac_tag (32 bytes) | enc_key (16 bytes) |
+  hkdf_salt (32 bytes) | reserved/padding (32 bytes) ]
+```
+
+The `hkdf_salt` is a per-image random value that acts as an HKDF diversifier.
+HKDF is applied with this salt to derive unique `xip_key` and `xip_iv` values
+for each image. This guarantees that even if two images share the same ECIES
+wrapping key, they receive distinct AES keys and IVs.
+
+The final 32-byte field is reserved padding for future use and must be zero.
+
+---
+***Note***
+
+*Every image must use a unique encryption key. AES-CTR with the same key and*
+*overlapping counter values is catastrophically insecure: it exposes the*
+*plaintext XOR relationship of two messages. The per-image random HKDF salt*
+*in the extended ECIES TLV ensures unique key/IV derivation for every image.*
+
+---
 
 ### Platform requirements
 
 A platform using XIP encryption must provide the following hook functions:
 
 * **`boot_image_check_hook(img_index, slot)`** -- Performs complete image
-  validation including hash verification over decrypted content and ECIES TLV
-  processing. Returns `FIH_SUCCESS` if the image is valid, `FIH_FAILURE`
-  otherwise. This replaces the standard `MCUboot` validation path.
+  validation including hash and signature verification over the encrypted image
+  and ECIES TLV processing. Returns `FIH_SUCCESS` if the image is valid,
+  `FIH_FAILURE` otherwise. This replaces the standard `MCUboot` validation path.
 
   ```c
   fih_ret boot_image_check_hook(int img_index, int slot);
@@ -305,6 +350,11 @@ configuring a separate crypto region for each one.
 * **ECIES-P256 wrapping** -- The per-image AES key is protected using
   ECIES-P256 in the image TLV, requiring the device's private key for
   extraction.
+* **Key uniqueness** -- The 32-byte HKDF salt in the extended TLV ensures each
+  image derives a unique key and IV. Reusing the same key with overlapping AES-CTR
+  counters would be catastrophic.
+* **Mandatory signature** -- The bootloader rejects unsigned encrypted XIP images
+  to prevent XOR attacks on known-plaintext ciphertext regions.
 * **FIH hardening** -- The `boot_image_check_hook()` return path uses
   `MCUboot`'s fault injection hardening (FIH) to protect against glitch
   attacks on the validation result.

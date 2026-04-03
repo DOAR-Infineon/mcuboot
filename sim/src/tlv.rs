@@ -285,7 +285,7 @@ impl TlvGen {
     pub fn new_xip_ecies_p256() -> TlvGen {
         TlvGen {
             flags: TlvFlags::ENCRYPTED_AES128 as u32,
-            kinds: vec![TlvKinds::SHA256, TlvKinds::ENCEC256],
+            kinds: vec![TlvKinds::SHA256, TlvKinds::ECDSASIG, TlvKinds::ENCEC256],
             ..Default::default()
         }
     }

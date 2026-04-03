@@ -24,11 +24,12 @@
  * Default (weak) boot_decrypt_xip -- software AES-CTR decryption.
  *
  * Retrieves key/IV from xip_enc_get_key() (populated by the validation
- * hook during ECIES unwrap). Builds AES-CTR nonce from IV + offset-based
- * counter and decrypts buf in-place.
+ * hook during ECIES unwrap). Builds AES-CTR nonce and decrypts buf in-place.
  *
- * Counter = off / 16 (absolute flash area offset).
- * Nonce = IV[0..11] || counter_be32.
+ * Nonce format (edgeprotecttools-aligned):
+ *   bits  0..31  = byte offset (little-endian)
+ *   bits 32..127 = xip_iv[0:12]
+ * Counter increments by 16 per AES block (raw byte offset).
  *
  * Platforms with hardware XIP decryption (e.g., Infineon SMIF) should
  * provide a strong override of this function.
@@ -41,7 +42,6 @@ int boot_decrypt_xip(int image_index, const struct flash_area *fap,
     uint8_t key[XIP_ENC_KEY_SIZE];
     uint8_t iv[XIP_ENC_IV_SIZE];
     uint8_t nonce[16];
-    uint32_t ctr;
     uint32_t blk_off;
     int rc;
 
@@ -56,19 +56,22 @@ int boot_decrypt_xip(int image_index, const struct flash_area *fap,
         return -1;
     }
 
-    /* Build nonce: IV[0..11] || counter(big-endian) */
-    (void)memcpy(nonce, iv, 16);
-    ctr = off >> 4;
-    nonce[12] = (uint8_t)(ctr >> 24);
-    nonce[13] = (uint8_t)(ctr >> 16);
-    nonce[14] = (uint8_t)(ctr >> 8);
-    nonce[15] = (uint8_t)(ctr);
+    /* Build nonce: counter_LE32 || iv[0:12]  (edgeprotecttools format)
+     *   bits 0..31  = byte offset (little-endian)
+     *   bits 32..127 = xip_iv[0:12]
+     */
+    (void)memset(nonce, 0, sizeof(nonce));
+    nonce[0] = (uint8_t)(off);
+    nonce[1] = (uint8_t)(off >> 8);
+    nonce[2] = (uint8_t)(off >> 16);
+    nonce[3] = (uint8_t)(off >> 24);
+    (void)memcpy(&nonce[4], iv, 12);
 
     bootutil_aes_ctr_init(&aes_ctr);
     rc = bootutil_aes_ctr_set_key(&aes_ctr, key);
     if (rc != 0) {
         bootutil_aes_ctr_drop(&aes_ctr);
-        (void)memset(key, 0, sizeof(key));
+        xip_enc_zeroize(key, sizeof(key));
         return -1;
     }
 
@@ -77,7 +80,7 @@ int boot_decrypt_xip(int image_index, const struct flash_area *fap,
     bootutil_aes_ctr_drop(&aes_ctr);
 
     /* Zeroize key from stack */
-    (void)memset(key, 0, sizeof(key));
+    xip_enc_zeroize(key, sizeof(key));
 
     return rc;
 }

@@ -874,6 +874,16 @@ config BOOT_ENCRYPT_XIP
 	  This does not require BOOT_ENCRYPT_IMAGE. The platform
 	  library handles all encryption independently.
 
+config BOOT_ENCRYPT_IMAGE_XIP
+	bool "XIP execute-in-place encryption"
+	depends on !BOOT_ENCRYPT_IMAGE
+	select BOOT_IMAGE_ACCESS_HOOKS
+	help
+	  Enable XIP encryption mode. Images are encrypted at build time
+	  and remain encrypted in flash. A hardware crypto engine provides
+	  transparent decryption during execution. Mutually exclusive with
+	  BOOT_ENCRYPT_IMAGE.
+
 config BOOT_MAX_IMG_SECTORS_AUTO
 	bool "Calculate maximum sectors automatically"
 	default y

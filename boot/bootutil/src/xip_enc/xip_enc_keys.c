@@ -42,9 +42,9 @@ int xip_enc_get_key(int img_index, uint8_t *key, uint8_t *iv)
     return 0;
 }
 
-void xip_enc_zeroize(void)
+void xip_enc_clear_keys(void)
 {
-    (void)memset(xip_keys, 0, sizeof(xip_keys));
+    xip_enc_zeroize(xip_keys, sizeof(xip_keys));
 }
 
 void boot_xip_populate_rsp(int img_index, struct boot_rsp *rsp)

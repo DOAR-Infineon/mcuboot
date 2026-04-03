@@ -250,9 +250,13 @@ hkdf(const uint8_t *ikm, uint16_t ikm_len,
         }
     }
 
+    xip_enc_zeroize(prk, sizeof(prk));
+    xip_enc_zeroize(T, sizeof(T));
     return 0;
 
 error:
+    xip_enc_zeroize(prk, sizeof(prk));
+    xip_enc_zeroize(T, sizeof(T));
     bootutil_hmac_sha256_drop(&hmac);
     return -1;
 }
@@ -307,7 +311,7 @@ xip_enc_ecies_unwrap(const uint8_t *tlv_buf, uint16_t tlv_len,
         return -1;
     }
 
-    if ((tlv_len < ECIES_STD_TLV_SIZE) || (tlv_len > ECIES_EXT_TLV_SIZE)) {
+    if (tlv_len != ECIES_STD_TLV_SIZE && tlv_len != ECIES_EXT_TLV_SIZE) {
         return -1;
     }
 
@@ -335,7 +339,7 @@ xip_enc_ecies_unwrap(const uint8_t *tlv_buf, uint16_t tlv_len,
     bootutil_ecdh_p256_drop(&ecdh_p256);
 
     /* Zeroize private key immediately after use */
-    (void)memset(private_key, 0, sizeof(private_key));
+    xip_enc_zeroize(private_key, sizeof(private_key));
 
     if (rc != 0) {
         return -1;
@@ -382,7 +386,7 @@ xip_enc_ecies_unwrap(const uint8_t *tlv_buf, uint16_t tlv_len,
               derived_key, &out_len);
 
     /* Zeroize shared secret */
-    (void)memset(shared, 0, sizeof(shared));
+    xip_enc_zeroize(shared, sizeof(shared));
 
     if ((rc != 0) || (hkdf_len != out_len)) {
         return -1;
@@ -440,7 +444,7 @@ xip_enc_ecies_unwrap(const uint8_t *tlv_buf, uint16_t tlv_len,
     rc = bootutil_aes_ctr_set_key(&aes_ctr, derived_key);
     if (rc != 0) {
         bootutil_aes_ctr_drop(&aes_ctr);
-        (void)memset(derived_key, 0, sizeof(derived_key));
+        xip_enc_zeroize(derived_key, sizeof(derived_key));
         return -1;
     }
 
@@ -452,12 +456,12 @@ xip_enc_ecies_unwrap(const uint8_t *tlv_buf, uint16_t tlv_len,
     bootutil_aes_ctr_drop(&aes_ctr);
 
     /* Zeroize all sensitive material */
-    (void)memset(derived_key, 0, sizeof(derived_key));
-    (void)memset(tag, 0, sizeof(tag));
+    xip_enc_zeroize(derived_key, sizeof(derived_key));
+    xip_enc_zeroize(tag, sizeof(tag));
 
     if (rc != 0) {
-        (void)memset(out_key, 0, XIP_AES_KEY_SIZE);
-        (void)memset(out_iv, 0, XIP_AES_BLOCK_SIZE);
+        xip_enc_zeroize(out_key, XIP_AES_KEY_SIZE);
+        xip_enc_zeroize(out_iv, XIP_AES_BLOCK_SIZE);
         return -1;
     }
 

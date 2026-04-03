@@ -462,6 +462,14 @@ fn main() {
         conf.conf.define("MCUBOOT_ENCRYPT_EC256", None);
         conf.conf.define("MCUBOOT_USE_TINYCRYPT", None);
 
+        // XIP encrypted images must be signed (ciphertext signing).
+        // Enable ECDSA signature verification so bootutil_verify_sig and
+        // bootutil_find_key are available to boot_image_check_hook.
+        if !sig_ecdsa && !sig_ecdsa_mbedtls && !sig_ecdsa_psa {
+            conf.conf.define("MCUBOOT_SIGN_EC256", None);
+            conf.conf.define("MCUBOOT_SIGN_EC", None);
+        }
+
         // XIP library files
         conf.file("../../boot/bootutil/src/xip_enc/xip_enc_keys.c");
         conf.file("../../boot/bootutil/src/xip_enc/xip_enc_ecies.c");
@@ -523,7 +531,7 @@ fn main() {
     conf.file("../../boot/bootutil/src/bootutil_img_security_cnt.c");
     if sig_rsa || sig_rsa3072 {
         conf.file("../../boot/bootutil/src/image_rsa.c");
-    } else if sig_ecdsa || sig_ecdsa_mbedtls || sig_ecdsa_psa {
+    } else if sig_ecdsa || sig_ecdsa_mbedtls || sig_ecdsa_psa || enc_xip_ec256 {
         conf.file("../../boot/bootutil/src/image_ecdsa.c");
     } else if sig_ed25519 {
         conf.file("../../boot/bootutil/src/image_ed25519.c");

@@ -20,6 +20,17 @@
 #error "MCUBOOT_ENC_IMAGES and MCUBOOT_ENC_IMAGES_XIP are mutually exclusive."
 #endif
 
+/**
+ * Secure zeroization — uses volatile pointer to prevent compiler optimization.
+ */
+static inline void xip_enc_zeroize(void *p, size_t n)
+{
+    volatile unsigned char *v = (volatile unsigned char *)p;
+    for (size_t i = 0; i < n; i++) {
+        v[i] = 0;
+    }
+}
+
 #define XIP_ENC_KEY_SIZE   16u
 #define XIP_ENC_IV_SIZE    16u
 #define XIP_ENC_MAX_IMAGES 3u
@@ -69,7 +80,7 @@ int xip_enc_get_key(int img_index, uint8_t *key, uint8_t *iv);
 /**
  * Zeroize all stored keys. Call before launching application.
  */
-void xip_enc_zeroize(void);
+void xip_enc_clear_keys(void);
 
 /**
  * ECIES-P256 key unwrap with extended TLV support.
