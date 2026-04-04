@@ -33,10 +33,16 @@ int flash_area_id_from_multi_image_slot(int image_index, int slot);
 /*
  * Compute SHA-256 hash over raw flash: header + ciphertext + protected TLVs.
  * No decryption — hash covers the encrypted payload as-is.
+ *
+ * @param fap       flash area to read from
+ * @param hdr       image header (already read from base_off)
+ * @param base_off  flash area offset where the image starts (0 for primary,
+ *                  non-zero for secondary in swap-offset mode)
+ * @param hash_out  32-byte output buffer
  */
 static int
-xip_img_hash(const struct flash_area *fap,
-             const struct image_header *hdr, uint8_t *hash_out)
+xip_img_hash(const struct flash_area *fap, const struct image_header *hdr,
+             uint32_t base_off, uint8_t *hash_out)
 {
     bootutil_sha_context sha_ctx;
     uint32_t hdr_size;
@@ -59,7 +65,7 @@ xip_img_hash(const struct flash_area *fap,
             blk_sz = sizeof(buf);
         }
 
-        rc = flash_area_read(fap, off, buf, blk_sz);
+        rc = flash_area_read(fap, base_off + off, buf, blk_sz);
         if (rc != 0) {
             bootutil_sha_drop(&sha_ctx);
             return -1;
@@ -85,11 +91,13 @@ xip_img_hash(const struct flash_area *fap,
  * Non-encrypted images are deferred to upstream (FIH_BOOT_HOOK_REGULAR).
  */
 __attribute__((weak))
-fih_ret boot_image_check_hook(int img_index, int slot)
+fih_ret boot_image_check_hook(struct boot_loader_state *state,
+                              int img_index, int slot)
 {
     FIH_DECLARE(fih_rc, FIH_FAILURE);
     const struct flash_area *fap = NULL;
     struct image_header hdr;
+    uint32_t base_off = 0;
     int rc;
 
     int fa_id = flash_area_id_from_multi_image_slot(img_index, slot);
@@ -98,7 +106,17 @@ fih_ret boot_image_check_hook(int img_index, int slot)
         FIH_RET(fih_rc);
     }
 
-    rc = flash_area_read(fap, 0, &hdr, sizeof(hdr));
+    /*
+     * In swap-offset mode the secondary image starts at a non-zero
+     * offset within the flash area.  Use state to find it.
+     */
+#if defined(MCUBOOT_SWAP_USING_OFFSET)
+    if (state != NULL) {
+        base_off = boot_get_state_secondary_offset(state, fap);
+    }
+#endif
+
+    rc = flash_area_read(fap, base_off, &hdr, sizeof(hdr));
     if (rc != 0 || hdr.ih_magic != IMAGE_MAGIC) {
         flash_area_close(fap);
         FIH_RET(fih_rc);
@@ -111,10 +129,41 @@ fih_ret boot_image_check_hook(int img_index, int slot)
     }
 
     /*
+     * Verify image size: the image (including all TLVs) must fit within
+     * the usable slot area.  The normal boot_check_image path does this
+     * via bootutil_img_validate, but since this hook bypasses that path
+     * the check is replicated here.
+     */
+    if (state != NULL) {
+        struct image_tlv_iter sz_it;
+#if defined(MCUBOOT_SWAP_USING_OFFSET)
+        sz_it.start_off = base_off;
+#endif
+        rc = bootutil_tlv_iter_begin(&sz_it, &hdr, fap,
+                                     IMAGE_TLV_ANY, false);
+        if (rc != 0) {
+            flash_area_close(fap);
+            FIH_RET(fih_rc);
+        }
+        {
+            uint32_t img_sz;
+#if defined(MCUBOOT_SWAP_USING_OFFSET)
+            img_sz = sz_it.tlv_end - sz_it.start_off;
+#else
+            img_sz = sz_it.tlv_end;
+#endif
+            if (img_sz > bootutil_max_image_size(state, fap)) {
+                flash_area_close(fap);
+                FIH_RET(fih_rc);
+            }
+        }
+    }
+
+    /*
      * Step 1: Hash raw ciphertext (no decryption)
      */
     uint8_t hash[32];
-    rc = xip_img_hash(fap, &hdr, hash);
+    rc = xip_img_hash(fap, &hdr, base_off, hash);
     if (rc != 0) {
         flash_area_close(fap);
         FIH_RET(fih_rc);
@@ -129,6 +178,9 @@ fih_ret boot_image_check_hook(int img_index, int slot)
         uint16_t tlv_len;
         uint8_t tlv_hash[32];
 
+#if defined(MCUBOOT_SWAP_USING_OFFSET)
+        it.start_off = base_off;
+#endif
         rc = bootutil_tlv_iter_begin(&it, &hdr, fap, IMAGE_TLV_SHA256, false);
         if (rc != 0) {
             flash_area_close(fap);
@@ -161,6 +213,9 @@ fih_ret boot_image_check_hook(int img_index, int slot)
         uint8_t sig_buf[128];
         int key_id = -1;
 
+#if defined(MCUBOOT_SWAP_USING_OFFSET)
+        it.start_off = base_off;
+#endif
         /* Find public key hash */
         rc = bootutil_tlv_iter_begin(&it, &hdr, fap, IMAGE_TLV_KEYHASH, false);
         if (rc == 0) {
@@ -184,6 +239,9 @@ fih_ret boot_image_check_hook(int img_index, int slot)
         }
 
         /* Find and verify ECDSA signature */
+#if defined(MCUBOOT_SWAP_USING_OFFSET)
+        it.start_off = base_off;
+#endif
         rc = bootutil_tlv_iter_begin(&it, &hdr, fap, IMAGE_TLV_ECDSA_SIG, false);
         if (rc != 0) {
             flash_area_close(fap);
@@ -219,6 +277,9 @@ fih_ret boot_image_check_hook(int img_index, int slot)
         uint8_t tlv_buf[180];
         uint8_t key[16], iv[16];
 
+#if defined(MCUBOOT_SWAP_USING_OFFSET)
+        it.start_off = base_off;
+#endif
         rc = bootutil_tlv_iter_begin(&it, &hdr, fap, IMAGE_TLV_ENC_EC256, false);
         if (rc != 0) {
             flash_area_close(fap);

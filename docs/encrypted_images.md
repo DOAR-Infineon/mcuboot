@@ -327,13 +327,17 @@ The final 32-byte field is reserved padding for future use and must be zero.
 
 A platform using XIP encryption must provide the following hook functions:
 
-* **`boot_image_check_hook(img_index, slot)`** -- Performs complete image
+* **`boot_image_check_hook(state, img_index, slot)`** -- Performs complete image
   validation including hash and signature verification over the encrypted image
   and ECIES TLV processing. Returns `FIH_SUCCESS` if the image is valid,
   `FIH_FAILURE` otherwise. This replaces the standard `MCUboot` validation path.
+  The `state` pointer provides access to boot loader context (slot flash areas,
+  secondary offset for swap-offset mode, max image size); it may be `NULL` when
+  called outside the normal boot flow (e.g. serial recovery).
 
   ```c
-  fih_ret boot_image_check_hook(int img_index, int slot);
+  fih_ret boot_image_check_hook(struct boot_loader_state *state,
+                                int img_index, int slot);
   ```
 
 * **`boot_xip_populate_rsp(img_index, rsp)`** -- Called after successful

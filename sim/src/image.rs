@@ -29,7 +29,6 @@ use aes::{
     NewBlockCipher,
 };
 use cipher::{
-    BlockCipher,
     BlockEncrypt,
     FromBlockCipher,
     generic_array::GenericArray,

@@ -640,7 +640,7 @@ boot_validate_slot(struct boot_loader_state *state, int slot,
         fih_rc = FIH_FAILURE;
     } else {
         BOOT_HOOK_CALL_FIH(boot_image_check_hook, FIH_BOOT_HOOK_REGULAR,
-                           fih_rc, BOOT_CURR_IMG(state), slot);
+                           fih_rc, state, BOOT_CURR_IMG(state), slot);
         if (FIH_EQ(fih_rc, FIH_BOOT_HOOK_REGULAR)) {
             FIH_CALL(boot_check_image, fih_rc, state, bs, slot);
         }
